@@ -1,0 +1,9 @@
+'header' 
+          magic_8bit = 137
+               magic = 'PNG\x0D\x0A'
+            magic_1a = 26
+            magic_0a = 10
+'chunk' 'IHDR' 
+        chunk_length = 13
+                type = 1229472850
+            type_str = 'IHDR'

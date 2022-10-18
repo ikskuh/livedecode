@@ -2,8 +2,14 @@ const std = @import("std");
 
 const allo = std.heap.c_allocator;
 
+const split_chars = " \r\n\t";
+
 fn trim(str: []const u8) []const u8 {
-    return std.mem.trim(u8, str, " \r\n");
+    return std.mem.trim(u8, str, split_chars);
+}
+
+fn write(comptime fmt: []const u8, args: anytype) void {
+    std.io.getStdOut().writer().print(fmt, args) catch std.os.exit(1);
 }
 
 pub fn main() !void {
@@ -24,7 +30,9 @@ pub fn main() !void {
         .file = binfile,
         .fields = std.StringHashMap(Value).init(allo),
         .programs = std.StringHashMap(std.ArrayList([]const u8)).init(allo),
+        .condstack = std.ArrayList(bool).init(allo),
     };
+    try state.condstack.append(true);
 
     while (true) {
         var cmdbuffer: [1024]u8 = undefined;
@@ -43,8 +51,23 @@ pub fn main() !void {
 
 const ExecError = error{ OutOfMemory, InvalidCharacter, Overflow, EndOfStream } || std.fs.File.ReadError || std.fs.File.SeekError;
 fn exec(line: []const u8, state: *State) ExecError!void {
-    var cmditer = std.mem.tokenize(u8, line, ": ");
+    var cmditer = std.mem.tokenize(u8, line, split_chars);
     const cmd = cmditer.next().?;
+
+    if (std.mem.startsWith(u8, cmd, ".")) {
+        inline for (@typeInfo(Macros).Struct.decls) |decl| {
+            if (std.mem.eql(u8, decl.name, cmd[1..])) {
+                try @field(Macros, decl.name)(state, &cmditer);
+                return;
+            }
+        }
+        std.debug.panic("unknown macro {s}", .{cmd});
+    }
+
+    // skip all non-macro lines
+    if (!state.enabled())
+        return;
+
     inline for (@typeInfo(Commands).Struct.decls) |decl| {
         if (std.mem.eql(u8, decl.name, cmd)) {
             try @field(Commands, decl.name)(state, &cmditer);
@@ -57,16 +80,16 @@ fn exec(line: []const u8, state: *State) ExecError!void {
 
     const reader = state.file.reader();
     const value: Value = switch (val_type) {
-        .u8 => Value{ .u8 = try reader.readIntLittle(u8) },
-        .u16 => Value{ .u16 = try reader.readIntLittle(u16) },
-        .u32 => Value{ .u32 = try reader.readIntLittle(u32) },
-        .u64 => Value{ .u64 = try reader.readIntLittle(u64) },
-        .i8 => Value{ .i8 = try reader.readIntLittle(i8) },
-        .i16 => Value{ .i16 = try reader.readIntLittle(i16) },
-        .i32 => Value{ .i32 = try reader.readIntLittle(i32) },
-        .i64 => Value{ .i64 = try reader.readIntLittle(i64) },
-        .f32 => Value{ .f32 = @bitCast(f32, try reader.readIntLittle(u32)) },
-        .f64 => Value{ .f64 = @bitCast(f64, try reader.readIntLittle(u64)) },
+        .u8 => Value{ .u8 = try reader.readInt(u8, state.endianess) },
+        .u16 => Value{ .u16 = try reader.readInt(u16, state.endianess) },
+        .u32 => Value{ .u32 = try reader.readInt(u32, state.endianess) },
+        .u64 => Value{ .u64 = try reader.readInt(u64, state.endianess) },
+        .i8 => Value{ .i8 = try reader.readInt(i8, state.endianess) },
+        .i16 => Value{ .i16 = try reader.readInt(i16, state.endianess) },
+        .i32 => Value{ .i32 = try reader.readInt(i32, state.endianess) },
+        .i64 => Value{ .i64 = try reader.readInt(i64, state.endianess) },
+        .f32 => Value{ .f32 = @bitCast(f32, try reader.readInt(u32, state.endianess)) },
+        .f64 => Value{ .f64 = @bitCast(f64, try reader.readInt(u64, state.endianess)) },
         .str => blk: {
             const len = try state.decodeInt(cmditer.next().?);
 
@@ -88,20 +111,54 @@ fn exec(line: []const u8, state: *State) ExecError!void {
     };
 
     if (cmditer.next()) |name| {
-        std.debug.print("{s: >20} = {}\n", .{ name, value });
+        write("{s: >20} = {}\n", .{ name, value });
         try state.fields.put(try allo.dupe(u8, name), value);
     }
 }
 
 const Args = std.mem.TokenIterator(u8);
 
+const Macros = struct {
+    pub fn @"if"(state: *State, iter: *Args) !void {
+        const condition = try state.decode(iter.next().?);
+        const is_met = if (iter.next()) |eql_str| blk: {
+            const value = try state.decode(eql_str);
+
+            break :blk (condition.getInt() == value.getInt());
+        } else condition.getInt() != 0;
+        try state.condstack.append(is_met);
+    }
+
+    // pub fn @"elseif"(state: *State, iter: *Args) !void {
+    //     try @"endif"(state, iter);
+    //     try @"if"(state, iter);
+    // }
+
+    pub fn @"else"(state: *State, iter: *Args) !void {
+        _ = iter;
+        const last = &state.condstack.items[state.condstack.items.len - 1];
+        last.* = !last.*;
+    }
+
+    pub fn @"endif"(state: *State, iter: *Args) !void {
+        _ = iter;
+        _ = state.condstack.pop();
+    }
+
+    pub fn @"def"(state: *State, iter: *Args) !void {
+        const name = try allo.dupe(u8, iter.next().?);
+        const value = try state.decode(iter.next().?);
+        try state.fields.put(name, value);
+    }
+};
+
 const Commands = struct {
     pub fn print(state: *State, iter: *Args) !void {
         while (iter.next()) |item| {
             var val = state.decode(item) catch Value{ .str = item };
-            std.debug.print("{} ", .{val});
+            write("{} ", .{val});
         }
-        std.debug.print("\n", .{});
+        write("\n", .{});
     }
 
     pub fn seek(state: *State, iter: *Args) !void {
@@ -116,12 +173,24 @@ const Commands = struct {
         try state.file.seekTo(offset);
     }
 
+    pub fn move(state: *State, iter: *Args) !void {
+        var offset: i64 = 0;
+        var good = false;
+        while (iter.next()) |item| {
+            good = true;
+            offset += try state.decodeSignedInt(item);
+        }
+        if (!good)
+            return;
+        try state.file.seekBy(offset);
+    }
+
     pub fn tell(state: *State, iter: *Args) !void {
         const where = try state.file.getPos();
         if (iter.next()) |value| {
             try state.fields.put(try allo.dupe(u8, value), .{ .u64 = where });
         }
-        std.debug.print("current file position: {}\n", .{where});
+        write("current file position: {}\n", .{where});
     }
 
     pub fn dump(state: *State, iter: *Args) !void {
@@ -136,29 +205,29 @@ const Commands = struct {
             const bytes = std.math.min(line_buffer.len, len - i);
             const actual = try state.file.read(line_buffer[0..bytes]);
 
-            std.debug.print("0x{X:0>8}:", .{where});
+            write("0x{X:0>8}:", .{where});
 
             for (line_buffer[0..actual]) |c, j| {
-                if (j == line_buffer.len / 2) std.debug.print(" ", .{});
-                std.debug.print(" {X:0>2}", .{c});
+                if (j == line_buffer.len / 2) write(" ", .{});
+                write(" {X:0>2}", .{c});
             }
             for (line_buffer[actual..]) |_, j| {
-                if ((actual + j) == line_buffer.len / 2) std.debug.print(" ", .{});
-                std.debug.print(" __", .{});
+                if ((actual + j) == line_buffer.len / 2) write(" ", .{});
+                write(" __", .{});
             }
 
-            std.debug.print(" |", .{});
+            write(" |", .{});
 
             for (line_buffer[0..actual]) |c| {
-                std.debug.print("{c}", .{
+                write("{c}", .{
                     if (std.ascii.isPrint(c)) c else '.',
                 });
             }
             for (line_buffer[actual..]) |_| {
-                std.debug.print(" ", .{});
+                write(" ", .{});
             }
 
-            std.debug.print("|\n", .{});
+            write("|\n", .{});
 
             where += actual;
             if (actual < bytes)
@@ -198,26 +267,53 @@ const Commands = struct {
             try exec(cmd, state);
         }
     }
+
+    pub fn endian(state: *State, iter: *Args) !void {
+        const kind = iter.next().?;
+
+        if (std.ascii.eqlIgnoreCase(kind, "little") or std.ascii.eqlIgnoreCase(kind, "le")) {
+            state.endianess = .Little;
+        } else if (std.ascii.eqlIgnoreCase(kind, "big") or std.ascii.eqlIgnoreCase(kind, "be")) {
+            state.endianess = .Big;
+        } else {
+            std.debug.panic("invalid endianess: {s}", .{kind});
+        }
+    }
 };
 
 const Program = std.ArrayList([]const u8);
 
 const State = struct {
+    endianess: std.builtin.Endian = .Little,
     file: std.fs.File,
     fields: std.StringHashMap(Value),
     programs: std.StringHashMap(Program),
+    condstack: std.ArrayList(bool),
 
     current_pgm: ?*Program = null,
+
+    fn enabled(state: State) bool {
+        return std.mem.allEqual(bool, state.condstack.items, true);
+    }
 
     fn decodeInt(state: State, str: []const u8) !u64 {
         var val = try state.decode(str);
         return val.getInt();
     }
 
+    fn decodeSignedInt(state: State, str: []const u8) !i64 {
+        var val = try state.decode(str);
+        return val.getSignedInt();
+    }
+
     fn decode(state: State, str: []const u8) !Value {
         return if (std.mem.startsWith(u8, str, "*"))
-            state.fields.get(str[1..]) orelse @panic("var not found")
-        else
+            state.fields.get(str[1..]) orelse std.debug.panic("var {s} not found", .{str[1..]})
+        else if (std.mem.startsWith(u8, str, "\""))
+            Value{ .str = try allo.dupe(u8, str[1 .. str.len - 1]) }
+        else if (std.fmt.parseInt(i64, str, 0)) |sval|
+            Value{ .i64 = sval }
+        else |_|
             Value{ .u64 = try std.fmt.parseInt(u64, str, 0) };
     }
 };
@@ -249,6 +345,23 @@ const Value = union(enum) {
             .f32 => |v| @floatToInt(u64, v),
             .f64 => |v| @floatToInt(u64, v),
             .str => |v| std.fmt.parseInt(u64, v, 0) catch unreachable,
+            .blob => @panic("blob is not an int"),
+        };
+    }
+
+    pub fn getSignedInt(val: Value) i64 {
+        return switch (val) {
+            .u8 => |v| @bitCast(i8, v),
+            .u16 => |v| @bitCast(i16, v),
+            .u32 => |v| @bitCast(i32, v),
+            .u64 => |v| @bitCast(i64, v),
+            .i8 => |v| v,
+            .i16 => |v| v,
+            .i32 => |v| v,
+            .i64 => |v| v,
+            .f32 => |v| @floatToInt(i64, v),
+            .f64 => |v| @floatToInt(i64, v),
+            .str => |v| std.fmt.parseInt(i64, v, 0) catch unreachable,
             .blob => @panic("blob is not an int"),
         };
     }
