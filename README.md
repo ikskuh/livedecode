@@ -85,4 +85,4 @@ dump *length
 .endif
 ```
 
-A more complete example can be found [here](examples/), which will decode a good amount of a PNG file.
+A more complete example can be found [here](example/), which will decode a good amount of a PNG file.
