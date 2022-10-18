@@ -100,3 +100,9 @@ dump *length
 ```
 
 A more complete example can be found [here](example/), which will decode a good amount of a PNG file.
+
+## Building
+
+1. Fetch the latest zig install (tested with `0.10.0-dev.4442+ce3ffa5e1`).
+2. Invoke `zig build`.
+3. Install `zig-out/bin/livedecode` into your system in a way you like it.
