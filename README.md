@@ -1,6 +1,6 @@
 # livedecode
 
-Decompile binary data on the fly quicker.
+Decode binary data on the fly quicker.
 
 ## Usage
 
