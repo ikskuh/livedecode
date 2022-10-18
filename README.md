@@ -8,6 +8,20 @@ Decompile binary data on the fly quicker.
 [user@host project]$ livedecode example/png.spec example/example.png
 ```
 
+The tool is meant to be run live while typing on a spec, so one can do stuff like this:
+![screenshot of program usage](doc/screenshot.png)
+
+Just run the program periodically in the background:
+
+```sh-session
+[user@host project]$ while true; do
+  clear
+  date
+  livedecode docs/wmb6.spec data/wmb/wmb6/block.wmb > /tmp/dump.txt
+  sleep 1
+done
+```
+
 ## Syntax
 
 The format is a very crude line based syntax. Empty lines are ignored, everything past a `#` is a comment.
