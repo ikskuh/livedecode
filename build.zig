@@ -7,7 +7,6 @@ pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("livedecode", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
-    exe.linkLibC();
     exe.install();
 
     const run_cmd = exe.run();

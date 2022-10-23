@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const allo = std.heap.c_allocator;
+var arena: std.heap.ArenaAllocator = undefined;
 
 const split_chars = " \r\n\t";
 
@@ -13,8 +13,11 @@ fn write(comptime fmt: []const u8, args: anytype) void {
 }
 
 pub fn main() !void {
-    const argv = try std.process.argsAlloc(allo);
-    defer std.process.argsFree(allo, argv);
+    arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const argv = try std.process.argsAlloc(arena.allocator());
+    defer std.process.argsFree(arena.allocator(), argv);
 
     if (argv.len != 3) @panic("usage: livedecode <spec> <binfile>");
 
@@ -28,9 +31,9 @@ pub fn main() !void {
 
     var state = State{
         .file = binfile,
-        .fields = std.StringHashMap(Value).init(allo),
-        .programs = std.StringHashMap(std.ArrayList([]const u8)).init(allo),
-        .condstack = std.ArrayList(bool).init(allo),
+        .fields = std.StringHashMap(Value).init(arena.allocator()),
+        .programs = std.StringHashMap(std.ArrayList([]const u8)).init(arena.allocator()),
+        .condstack = std.ArrayList(bool).init(arena.allocator()),
     };
     try state.condstack.append(true);
 
@@ -93,7 +96,7 @@ fn exec(line: []const u8, state: *State) ExecError!void {
         .str => blk: {
             const len = try state.decodeInt(cmditer.next().?);
 
-            var mem = try allo.alloc(u8, len);
+            var mem = try arena.allocator().alloc(u8, len);
 
             try reader.readNoEof(mem);
 
@@ -102,7 +105,7 @@ fn exec(line: []const u8, state: *State) ExecError!void {
         .blob => blk: {
             const len = try state.decodeInt(cmditer.next().?);
 
-            var mem = try allo.alloc(u8, len);
+            var mem = try arena.allocator().alloc(u8, len);
 
             try reader.readNoEof(mem);
 
@@ -112,7 +115,7 @@ fn exec(line: []const u8, state: *State) ExecError!void {
 
     if (cmditer.next()) |name| {
         write("{s: >20} = {}\n", .{ name, value });
-        try state.fields.put(try allo.dupe(u8, name), value);
+        try state.fields.put(try arena.allocator().dupe(u8, name), value);
     }
 }
 
@@ -146,7 +149,7 @@ const Macros = struct {
     }
 
     pub fn @"def"(state: *State, iter: *Args) !void {
-        const name = try allo.dupe(u8, iter.next().?);
+        const name = try arena.allocator().dupe(u8, iter.next().?);
         const value = try state.decode(iter.next().?);
         try state.fields.put(name, value);
     }
@@ -188,7 +191,7 @@ const Commands = struct {
     pub fn tell(state: *State, iter: *Args) !void {
         const where = try state.file.getPos();
         if (iter.next()) |value| {
-            try state.fields.put(try allo.dupe(u8, value), .{ .u64 = where });
+            try state.fields.put(try arena.allocator().dupe(u8, value), .{ .u64 = where });
         }
         write("current file position: {}\n", .{where});
     }
@@ -239,17 +242,17 @@ const Commands = struct {
     pub fn pgm(state: *State, iter: *Args) !void {
         const name = iter.next().?;
 
-        const gop = try state.programs.getOrPut(try allo.dupe(u8, name));
+        const gop = try state.programs.getOrPut(try arena.allocator().dupe(u8, name));
         if (gop.found_existing)
             @panic("program already exists");
 
-        gop.value_ptr.* = std.ArrayList([]const u8).init(allo);
+        gop.value_ptr.* = std.ArrayList([]const u8).init(arena.allocator());
         state.current_pgm = gop.value_ptr;
     }
 
     // ! line
     pub fn @"!"(state: *State, iter: *Args) !void {
-        try state.current_pgm.?.append(try allo.dupe(u8, trim(iter.buffer[1..])));
+        try state.current_pgm.?.append(try arena.allocator().dupe(u8, trim(iter.buffer[1..])));
     }
 
     // replay name
@@ -258,7 +261,7 @@ const Commands = struct {
 
         var argc: usize = 0;
         while (iter.next()) |argv| : (argc += 1) {
-            const name = try std.fmt.allocPrint(allo, "arg[{}]", .{argc});
+            const name = try std.fmt.allocPrint(arena.allocator(), "arg[{}]", .{argc});
             try state.fields.put(name, try state.decode(argv));
         }
 
@@ -310,7 +313,7 @@ const State = struct {
         return if (std.mem.startsWith(u8, str, "*"))
             state.fields.get(str[1..]) orelse std.debug.panic("var {s} not found", .{str[1..]})
         else if (std.mem.startsWith(u8, str, "\""))
-            Value{ .str = try allo.dupe(u8, str[1 .. str.len - 1]) }
+            Value{ .str = try arena.allocator().dupe(u8, str[1 .. str.len - 1]) }
         else if (std.fmt.parseInt(i64, str, 0)) |sval|
             Value{ .i64 = sval }
         else |_|
