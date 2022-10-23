@@ -51,6 +51,8 @@ endian le       # changes integer endianess to little endian
 endian little   # changes integer endianess to little endian
 endian be       # changes integer endianess to big endian
 endian big      # changes integer endianess to big endian
+bitread         # switches to bit-reading mode
+byteread        # switches out of bit-reading mode, discarding any unread bits in the current byte
 ```
 
 Available macros are:
@@ -66,18 +68,20 @@ Available macros are:
 Available types are:
 
 ```rb
-u8         #  8 bit unsigned integer
-u16        # 16 bit unsigned integer
-u32        # 32 bit unsigned integer
-u64        # 64 bit unsigned integer
-i8         #  8 bit signed integer, two's complement
-i16        # 16 bit signed integer, two's complement
-i32        # 32 bit signed integer, two's complement
-i64        # 64 bit signed integer, two's complement
-f32        # 32 bit floating point
-f64        # 64 bit floating point
-str  <len> # ascii string of <len> bytes, displayed as string+escapes
-blob <len> # binary blob of <len> bytes, displayed as array
+u8            #  8 bit unsigned integer
+u16           # 16 bit unsigned integer
+u32           # 32 bit unsigned integer
+u64           # 64 bit unsigned integer
+i8            #  8 bit signed integer, two's complement
+i16           # 16 bit signed integer, two's complement
+i32           # 32 bit signed integer, two's complement
+i64           # 64 bit signed integer, two's complement
+f32           # 32 bit floating point
+f64           # 64 bit floating point
+str  <len>    # ascii string of <len> bytes, displayed as string+escapes
+blob <len>    # binary blob of <len> bytes, displayed as array
+bitblob <len> # binary blob of <len> bits, displayed as array of bits (only valid in bit-reading mode)
+bits <len>    # an unsigned integer of <len> bits up to 64 (only valid in bit-reading mode)
 ```
 
 ## Example
