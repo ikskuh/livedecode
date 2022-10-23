@@ -34,6 +34,7 @@ pub fn main() !void {
         .fields = std.StringHashMap(Value).init(arena.allocator()),
         .programs = std.StringHashMap(std.ArrayList([]const u8)).init(arena.allocator()),
         .condstack = std.ArrayList(bool).init(arena.allocator()),
+        .bitread = null,
     };
     try state.condstack.append(true);
 
@@ -81,7 +82,7 @@ fn exec(line: []const u8, state: *State) ExecError!void {
     // type name
     const val_type = std.meta.stringToEnum(Type, cmd) orelse std.debug.panic("unknown type: {s}", .{cmd});
 
-    const reader = state.file.reader();
+    const reader = state.reader();
     const value: Value = switch (val_type) {
         .u8 => Value{ .u8 = try reader.readInt(u8, state.endianess) },
         .u16 => Value{ .u16 = try reader.readInt(u16, state.endianess) },
@@ -110,6 +111,31 @@ fn exec(line: []const u8, state: *State) ExecError!void {
             try reader.readNoEof(mem);
 
             break :blk Value{ .blob = mem };
+        },
+        .bitblob => blk: {
+            if (state.bitread) |*br| {
+                const len = try state.decodeInt(cmditer.next().?);
+                var mem = try arena.allocator().alloc(u1, len);
+                switch (state.endianess) {
+                    .Little => try readBits(&br.le, mem),
+                    .Big => try readBits(&br.be, mem),
+                }
+                break :blk Value{ .bitblob = mem };
+            } else {
+                @panic("attempt to read bitblob in byteread mode");
+            }
+        },
+        .bits => blk: {
+            if (state.bitread) |*br| {
+                const len = try state.decodeInt(cmditer.next().?);
+                if (len > 64) @panic("cannot read over 64 bits into an integer");
+                break :blk Value{ .bits = switch (state.endianess) {
+                    .Little => try br.le.readBitsNoEof(u64, len),
+                    .Big => try br.be.readBitsNoEof(u64, len),
+                } };
+            } else {
+                @panic("attempt to read bits in byteread mode");
+            }
         },
     };
 
@@ -165,6 +191,7 @@ const Commands = struct {
     }
 
     pub fn seek(state: *State, iter: *Args) !void {
+        if (state.bitread != null) @panic("cannot seek while reading bits");
         var offset: u64 = 0;
         var good = false;
         while (iter.next()) |item| {
@@ -177,6 +204,7 @@ const Commands = struct {
     }
 
     pub fn move(state: *State, iter: *Args) !void {
+        if (state.bitread != null) @panic("cannot move while reading bits");
         var offset: i64 = 0;
         var good = false;
         while (iter.next()) |item| {
@@ -272,6 +300,12 @@ const Commands = struct {
     }
 
     pub fn endian(state: *State, iter: *Args) !void {
+        if (state.bitread != null) {
+            // there isn't really a logical way to do this since the endian
+            // affects the order in which the bitreader goes through bytes
+            @panic("cannot switch endianness while reading bits");
+        }
+
         const kind = iter.next().?;
 
         if (std.ascii.eqlIgnoreCase(kind, "little") or std.ascii.eqlIgnoreCase(kind, "le")) {
@@ -281,6 +315,19 @@ const Commands = struct {
         } else {
             std.debug.panic("invalid endianess: {s}", .{kind});
         }
+    }
+
+    pub fn bitread(state: *State, iter: *Args) !void {
+        _ = iter;
+        state.bitread = switch (state.endianess) {
+            .Little => .{ .le = std.io.bitReader(.Little, state.file.reader()) },
+            .Big => .{ .be = std.io.bitReader(.Big, state.file.reader()) },
+        };
+    }
+
+    pub fn byteread(state: *State, iter: *Args) !void {
+        _ = iter;
+        state.bitread = null;
     }
 };
 
@@ -292,6 +339,10 @@ const State = struct {
     fields: std.StringHashMap(Value),
     programs: std.StringHashMap(Program),
     condstack: std.ArrayList(bool),
+    bitread: ?union { // non-null while in bitread mode
+        le: std.io.BitReader(.Little, std.fs.File.Reader),
+        be: std.io.BitReader(.Big, std.fs.File.Reader),
+    },
 
     current_pgm: ?*Program = null,
 
@@ -319,6 +370,17 @@ const State = struct {
         else |_|
             Value{ .u64 = try std.fmt.parseInt(u64, str, 0) };
     }
+
+    pub fn read(state: *State, buf: []u8) !usize {
+        return if (state.bitread) |*br| switch (state.endianess) {
+            .Little => br.le.reader().read(buf),
+            .Big => br.be.reader().read(buf),
+        } else state.file.reader().read(buf);
+    }
+
+    fn reader(state: *State) std.io.Reader(*State, std.fs.File.Reader.Error, read) {
+        return .{ .context = state };
+    }
 };
 
 const Value = union(enum) {
@@ -335,6 +397,10 @@ const Value = union(enum) {
     str: []const u8,
     blob: []const u8,
 
+    // bitread cases
+    bitblob: []const u1, // this is really inefficient but it's fine
+    bits: u64,
+
     pub fn getInt(val: Value) u64 {
         return switch (val) {
             .u8 => |v| v,
@@ -349,6 +415,8 @@ const Value = union(enum) {
             .f64 => |v| @floatToInt(u64, v),
             .str => |v| std.fmt.parseInt(u64, v, 0) catch unreachable,
             .blob => @panic("blob is not an int"),
+            .bitblob => @panic("bitblob is not an int"),
+            .bits => |v| v,
         };
     }
 
@@ -366,6 +434,8 @@ const Value = union(enum) {
             .f64 => |v| @floatToInt(i64, v),
             .str => |v| std.fmt.parseInt(i64, v, 0) catch unreachable,
             .blob => @panic("blob is not an int"),
+            .bitblob => @panic("bitblob is not an int"),
+            .bits => |v| @intCast(i64, v), // TODO we might want to store the number of bits used so we can convert to signed
         };
     }
 
@@ -381,3 +451,9 @@ const Value = union(enum) {
 };
 
 const Type = std.meta.Tag(Value);
+
+fn readBits(br: anytype, out: []u1) !void {
+    for (out) |*b| {
+        b.* = try br.readBitsNoEof(u1, 1);
+    }
+}
