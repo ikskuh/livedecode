@@ -815,7 +815,7 @@ const Ast = struct {
     };
 
     pub const Node = union(enum) {
-        @"if": Conditional,
+        decision: Conditional,
         loop: Loop,
         breakloop,
         command: Command,
@@ -953,17 +953,33 @@ const Ast = struct {
     }
 
     const Macro = enum {
-        @"if",
         loop,
-        pgm,
-
-        endpgm,
-        endif,
-        elseif,
         endloop,
+
+        pgm,
+        endpgm,
+
+        @"if",
+        elseif,
+        @"else",
+        endif,
     };
 
-    fn parseSequence(script: *Script, stream: *Tokenizer, terminator: ?Macro) Sequence {
+    fn makeSingleTerminator(comptime mac: Macro) fn (Macro) bool {
+        return struct {
+            fn f(t: Macro) bool {
+                return t == mac;
+            }
+        }.f;
+    }
+
+    var if_terminator: Macro = undefined;
+    fn isEndOrElseOrElseIf(m: Macro) bool {
+        if_terminator = m;
+        return m == .endif or m == .elseif or m == .@"else";
+    }
+
+    fn parseSequence(script: *Script, stream: *Tokenizer, terminator: ?*const fn (Macro) bool) Sequence {
         var list = std.ArrayList(Node).init(allo);
         defer list.deinit();
 
@@ -971,13 +987,13 @@ const Ast = struct {
             const first_token: Token = next(stream) orelse if (terminator == null)
                 return Sequence{ .is_top_level = true, .instructions = list.toOwnedSlice() }
             else
-                std.debug.panic("Expected {s}, not end of script.", .{@tagName(terminator.?)});
+                std.debug.panic("Did not expect end of script.", .{});
 
             switch (first_token.type) {
                 .macro => {
                     const mac = std.meta.stringToEnum(Macro, first_token.text[1..]) orelse std.debug.panic("Unknown macro {s}", .{first_token.text});
 
-                    if (terminator != null and mac == terminator.?) {
+                    if (terminator != null and terminator.?(mac)) {
                         return Sequence{
                             .is_top_level = false,
                             .instructions = list.toOwnedSlice(),
@@ -985,7 +1001,53 @@ const Ast = struct {
                     }
 
                     switch (mac) {
-                        .@"if" => unreachable, // NOT DONE YET
+                        .@"if" => {
+                            while (true) {
+                                const value = parseTokenValue(stream, next(stream) orelse @panic("expected condition value"));
+
+                                const maybe_comp = next(stream);
+
+                                const comparison = if (maybe_comp != null and maybe_comp.?.type != .line_feed)
+                                    parseTokenValue(stream, maybe_comp.?)
+                                else
+                                    null;
+
+                                if (comparison != null)
+                                    endOfLine(stream); // terminate .if or .elseif
+
+                                const true_block = parseSequence(undefined, stream, isEndOrElseOrElseIf);
+
+                                if (if_terminator == .endif) {
+                                    endOfLine(stream); // terminate .endif
+
+                                    list.append(Node{
+                                        .decision = Conditional{
+                                            .value = value,
+                                            .comparison = comparison,
+                                            .true_body = true_block,
+                                            .false_body = null,
+                                        },
+                                    }) catch @panic("oom");
+
+                                    break;
+                                }
+                                if (if_terminator == .@"else") {
+                                    const false_block = parseSequence(undefined, stream, isEndOrElseOrElseIf);
+                                    endOfLine(stream);
+
+                                    list.append(Node{
+                                        .decision = Conditional{
+                                            .value = value,
+                                            .comparison = comparison,
+                                            .true_body = true_block,
+                                            .false_body = false_block,
+                                        },
+                                    }) catch @panic("oom");
+
+                                    break;
+                                }
+                            }
+                        },
 
                         .loop => {
                             const count = parseTokenValue(stream, next(stream) orelse @panic("expected loop counter!"));
@@ -999,7 +1061,9 @@ const Ast = struct {
                             if (variable != null)
                                 endOfLine(stream);
 
-                            var seq = parseSequence(undefined, stream, .endloop);
+                            var seq = parseSequence(undefined, stream, makeSingleTerminator(.endloop));
+
+                            endOfLine(stream);
 
                             list.append(Node{
                                 .loop = Loop{
@@ -1019,15 +1083,15 @@ const Ast = struct {
                                 .code = undefined,
                             };
                             endOfLine(stream);
-
-                            pgm.code = parseSequence(undefined, stream, .endpgm);
+                            pgm.code = parseSequence(undefined, stream, makeSingleTerminator(.endpgm));
+                            endOfLine(stream); // .endpgm has no possible arg
 
                             const new = allo.realloc(script.programs, script.programs.len + 1) catch @panic("oom");
                             new[new.len - 1] = pgm;
                             script.programs = new;
                         },
 
-                        .endloop, .endpgm, .endif, .elseif => std.debug.print("Unexpected token {s}", .{first_token.text}),
+                        .endloop, .endpgm, .endif, .elseif, .@"else" => std.debug.print("Unexpected token {s}", .{first_token.text}),
                     }
                 },
 
@@ -1126,28 +1190,32 @@ const Ast = struct {
         );
     }
 
-    test "subprograms" {
-        const prog = runTest(
-            \\.pgm foobar
-            \\
-            \\.endpgm
-            \\
-        );
-        try std.testing.expectEqual(true, prog.top_level.is_top_level);
-        try std.testing.expectEqual(@as(usize, 0), prog.top_level.instructions.len);
-        try std.testing.expectEqual(@as(usize, 1), prog.programs.len);
-        try std.testing.expectEqualStrings("foobar", prog.programs[0].name);
-        try std.testing.expectEqual(false, prog.programs[0].code.is_top_level);
-        try std.testing.expectEqual(@as(usize, 0), prog.programs[0].code.instructions.len);
-    }
-
     test "basic loop" {
         const prog = runTest(
             \\.loop 10
             \\
             \\.endloop
         );
-        _ = prog;
+        try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+        try std.testing.expect(prog.top_level.instructions[0] == .loop);
+        try std.testing.expect(prog.top_level.instructions[0].loop.variable == null);
+        try std.testing.expect(prog.top_level.instructions[0].loop.body.instructions.len == 0);
+    }
+
+    test "nested basic loop" {
+        const prog = runTest(
+            \\.loop 10
+            \\  .loop 20
+            \\  .endloop
+            \\.endloop
+        );
+        try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+        try std.testing.expect(prog.top_level.instructions[0] == .loop);
+        try std.testing.expect(prog.top_level.instructions[0].loop.variable == null);
+        try std.testing.expect(prog.top_level.instructions[0].loop.body.instructions.len == 1);
+        try std.testing.expect(prog.top_level.instructions[0].loop.body.instructions[0] == .loop);
+        try std.testing.expect(prog.top_level.instructions[0].loop.body.instructions[0].loop.variable == null);
+        try std.testing.expect(prog.top_level.instructions[0].loop.body.instructions[0].loop.body.instructions.len == 0);
     }
 
     test "variable loop" {
@@ -1156,7 +1224,146 @@ const Ast = struct {
             \\
             \\.endloop
         );
+        try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+        try std.testing.expect(prog.top_level.instructions[0] == .loop);
+        try std.testing.expectEqualStrings("index", prog.top_level.instructions[0].loop.variable.?);
+    }
+
+    test "simple if block" {
+        const prog = runTest(
+            \\.if foo
+            \\
+            \\.endif
+        );
         _ = prog;
+        // try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+        // try std.testing.expect(prog.top_level.instructions[0] == .loop);
+        // try std.testing.expectEqualStrings("index", prog.top_level.instructions[0].loop.variable.?);
+    }
+
+    test "comparison if block" {
+        const prog = runTest(
+            \\.if foo bar
+            \\
+            \\.endif
+        );
+        _ = prog;
+        // try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+        // try std.testing.expect(prog.top_level.instructions[0] == .loop);
+        // try std.testing.expectEqualStrings("index", prog.top_level.instructions[0].loop.variable.?);
+    }
+
+    test "simple if-else" {
+        const prog = runTest(
+            \\.if foo
+            \\
+            \\.else
+            \\
+            \\.endif
+        );
+        _ = prog;
+        // try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+        // try std.testing.expect(prog.top_level.instructions[0] == .loop);
+        // try std.testing.expectEqualStrings("index", prog.top_level.instructions[0].loop.variable.?);
+    }
+
+    test "comparison if-else" {
+        const prog = runTest(
+            \\.if foo bar
+            \\
+            \\.else
+            \\
+            \\.endif
+        );
+        _ = prog;
+        // try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+        // try std.testing.expect(prog.top_level.instructions[0] == .loop);
+        // try std.testing.expectEqualStrings("index", prog.top_level.instructions[0].loop.variable.?);
+    }
+
+    // test "simple if-elseif" {
+    //     const prog = runTest(
+    //         \\.if foo
+    //         \\
+    //         \\.elseif bar
+    //         \\
+    //         \\.elseif bam
+    //         \\
+    //         \\.endif
+    //     );
+    //     _ = prog;
+    //     // try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+    //     // try std.testing.expect(prog.top_level.instructions[0] == .loop);
+    //     // try std.testing.expectEqualStrings("index", prog.top_level.instructions[0].loop.variable.?);
+    // }
+
+    // test "comparison if-elseif" {
+    //     const prog = runTest(
+    //         \\.if foo 10
+    //         \\
+    //         \\.elseif bar 10
+    //         \\
+    //         \\.elseif bam 10
+    //         \\
+    //         \\.endif
+    //     );
+    //     _ = prog;
+    //     // try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+    //     // try std.testing.expect(prog.top_level.instructions[0] == .loop);
+    //     // try std.testing.expectEqualStrings("index", prog.top_level.instructions[0].loop.variable.?);
+    // }
+
+    // test "simple if-elseif-else" {
+    //     const prog = runTest(
+    //         \\.if foo
+    //         \\
+    //         \\.elseif bar
+    //         \\
+    //         \\.elseif bam
+    //         \\
+    //         \\.else
+    //         \\
+    //         \\.endif
+    //     );
+    //     _ = prog;
+    //     // try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+    //     // try std.testing.expect(prog.top_level.instructions[0] == .loop);
+    //     // try std.testing.expectEqualStrings("index", prog.top_level.instructions[0].loop.variable.?);
+    // }
+
+    // test "comparison if-elseif-else" {
+    //     const prog = runTest(
+    //         \\.if foo 10
+    //         \\
+    //         \\.elseif bar 10
+    //         \\
+    //         \\.elseif bam 10
+    //         \\
+    //         \\.else
+    //         \\
+    //         \\.endif
+    //     );
+    //     _ = prog;
+    //     // try std.testing.expectEqual(@as(usize, 1), prog.top_level.instructions.len);
+    //     // try std.testing.expect(prog.top_level.instructions[0] == .loop);
+    //     // try std.testing.expectEqualStrings("index", prog.top_level.instructions[0].loop.variable.?);
+    // }
+
+    test "subprograms" {
+        const prog = runTest(
+            \\.pgm foobar
+            \\  type 10
+            \\  type 20
+            \\  type 30
+            \\.endpgm
+            \\
+        );
+        try std.testing.expectEqual(true, prog.top_level.is_top_level);
+        try std.testing.expectEqual(@as(usize, 0), prog.top_level.instructions.len);
+        try std.testing.expectEqual(@as(usize, 1), prog.programs.len);
+        try std.testing.expectEqualStrings("foobar", prog.programs[0].name);
+        try std.testing.expectEqual(false, prog.programs[0].code.is_top_level);
+        try std.testing.expectEqual(@as(usize, 3), prog.programs[0].code.instructions.len);
     }
 };
 
