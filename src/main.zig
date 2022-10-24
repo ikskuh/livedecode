@@ -1,6 +1,7 @@
 const std = @import("std");
 
 var arena: std.heap.ArenaAllocator = undefined;
+var allo: std.mem.Allocator = arena.allocator();
 
 const split_chars = " \r\n\t";
 
@@ -8,16 +9,21 @@ fn trim(str: []const u8) []const u8 {
     return std.mem.trim(u8, str, split_chars);
 }
 
+var bout: std.io.BufferedWriter(4096, std.fs.File.Writer) = undefined;
+
 fn write(comptime fmt: []const u8, args: anytype) void {
-    std.io.getStdOut().writer().print(fmt, args) catch std.os.exit(1);
+    bout.writer().print(fmt, args) catch std.os.exit(1);
 }
 
 pub fn main() !void {
     arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    const argv = try std.process.argsAlloc(arena.allocator());
-    defer std.process.argsFree(arena.allocator(), argv);
+    bout = std.io.bufferedWriter(std.io.getStdOut().writer());
+    defer bout.flush() catch {};
+
+    const argv = try std.process.argsAlloc(allo);
+    defer std.process.argsFree(allo, argv);
 
     if (argv.len != 3) @panic("usage: livedecode <spec> <binfile>");
 
@@ -31,12 +37,18 @@ pub fn main() !void {
 
     var state = State{
         .file = binfile,
-        .fields = std.StringHashMap(Value).init(arena.allocator()),
-        .programs = std.StringHashMap(std.ArrayList([]const u8)).init(arena.allocator()),
-        .condstack = std.ArrayList(bool).init(arena.allocator()),
+        .code = specfile,
+        .fields = std.StringHashMap(Value).init(allo),
+        .programs = std.StringHashMap(std.ArrayList([]const u8)).init(allo),
+        .condstack = std.ArrayList(bool).init(allo),
+        .repeatstack = std.ArrayList(Loop).init(allo),
         .bitread = null,
     };
     try state.condstack.append(true);
+
+    try state.fields.put("file.path", Value{ .str = argv[2] });
+    try state.fields.put("file.name", Value{ .str = std.fs.path.basename(argv[2]) });
+    try state.fields.put("file.size", Value{ .u64 = try state.file.getEndPos() });
 
     while (true) {
         var cmdbuffer: [1024]u8 = undefined;
@@ -82,7 +94,21 @@ fn exec(line: []const u8, state: *State) ExecError!void {
     // type name
     const val_type = std.meta.stringToEnum(Type, cmd) orelse std.debug.panic("unknown type: {s}", .{cmd});
 
-    const reader = state.reader();
+    const length = if (val_type.requiresLength())
+        try state.decodeInt(cmditer.next().?)
+    else
+        0;
+
+    const value = try fetchType(state, val_type, length);
+
+    if (cmditer.next()) |name| {
+        write("{s: >20} = {}\n", .{ name, value });
+        try state.fields.put(try allo.dupe(u8, name), value);
+    }
+}
+
+fn fetchType(state: *State, val_type: Type, length: usize) !Value {
+    const reader = state.file.reader();
     const value: Value = switch (val_type) {
         .u8 => Value{ .u8 = try reader.readInt(u8, state.endianess) },
         .u16 => Value{ .u16 = try reader.readInt(u16, state.endianess) },
@@ -95,27 +121,18 @@ fn exec(line: []const u8, state: *State) ExecError!void {
         .f32 => Value{ .f32 = @bitCast(f32, try reader.readInt(u32, state.endianess)) },
         .f64 => Value{ .f64 = @bitCast(f64, try reader.readInt(u64, state.endianess)) },
         .str => blk: {
-            const len = try state.decodeInt(cmditer.next().?);
-
-            var mem = try arena.allocator().alloc(u8, len);
-
+            var mem = try allo.alloc(u8, length);
             try reader.readNoEof(mem);
-
             break :blk Value{ .str = mem };
         },
         .blob => blk: {
-            const len = try state.decodeInt(cmditer.next().?);
-
-            var mem = try arena.allocator().alloc(u8, len);
-
+            var mem = try allo.alloc(u8, length);
             try reader.readNoEof(mem);
-
             break :blk Value{ .blob = mem };
         },
         .bitblob => blk: {
             if (state.bitread) |*br| {
-                const len = try state.decodeInt(cmditer.next().?);
-                var mem = try arena.allocator().alloc(u1, len);
+                var mem = try allo.alloc(u1, length);
                 switch (state.endianess) {
                     .Little => try readBits(&br.le, mem),
                     .Big => try readBits(&br.be, mem),
@@ -127,11 +144,10 @@ fn exec(line: []const u8, state: *State) ExecError!void {
         },
         .bits => blk: {
             if (state.bitread) |*br| {
-                const len = try state.decodeInt(cmditer.next().?);
-                if (len > 64) @panic("cannot read over 64 bits into an integer");
+                if (length > 64) @panic("cannot read over 64 bits into an integer");
                 break :blk Value{ .bits = switch (state.endianess) {
-                    .Little => try br.le.readBitsNoEof(u64, len),
-                    .Big => try br.be.readBitsNoEof(u64, len),
+                    .Little => try br.le.readBitsNoEof(u64, length),
+                    .Big => try br.be.readBitsNoEof(u64, length),
                 } };
             } else {
                 @panic("attempt to read bits in byteread mode");
@@ -139,10 +155,7 @@ fn exec(line: []const u8, state: *State) ExecError!void {
         },
     };
 
-    if (cmditer.next()) |name| {
-        write("{s: >20} = {}\n", .{ name, value });
-        try state.fields.put(try arena.allocator().dupe(u8, name), value);
-    }
+    return value;
 }
 
 const Args = std.mem.TokenIterator(u8);
@@ -175,19 +188,62 @@ const Macros = struct {
     }
 
     pub fn @"def"(state: *State, iter: *Args) !void {
-        const name = try arena.allocator().dupe(u8, iter.next().?);
+        const name = try allo.dupe(u8, iter.next().?);
         const value = try state.decode(iter.next().?);
         try state.fields.put(name, value);
+    }
+
+    // .loop <count>
+    // .loop <count> <var>
+    pub fn @"loop"(state: *State, iter: *Args) !void {
+        var lop = Loop{
+            .start_offset = try state.code.getPos(),
+            .count = 0,
+            .limit = try state.decodeInt(iter.next().?),
+            .loopvar = try allo.dupe(u8, iter.next() orelse ""),
+        };
+        try state.repeatstack.append(lop);
+        if (lop.loopvar.len > 0) {
+            try state.fields.put(lop.loopvar, Value{ .u64 = lop.count });
+        }
+    }
+
+    pub fn @"endloop"(state: *State, iter: *Args) !void {
+        _ = iter;
+        const lop = &state.repeatstack.items[state.repeatstack.items.len - 1];
+
+        if (lop.count == lop.limit) {
+            _ = state.repeatstack.pop();
+        } else {
+            lop.count += 1;
+            if (lop.loopvar.len > 0) {
+                try state.fields.put(lop.loopvar, Value{ .u64 = lop.count });
+            }
+            try state.code.seekTo(lop.start_offset);
+        }
     }
 };
 
 const Commands = struct {
     pub fn print(state: *State, iter: *Args) !void {
+        var suppress_space = false;
+
         while (iter.next()) |item| {
-            var val = state.decode(item) catch Value{ .str = item };
-            write("{} ", .{val});
+            if (std.mem.eql(u8, item, ";")) {
+                suppress_space = true;
+            } else {
+                var val = state.decode(item) catch Value{ .str = item };
+                write("{}", .{val});
+                if (!suppress_space) {
+                    write(" ", .{});
+                }
+                suppress_space = false;
+            }
         }
-        write("\n", .{});
+
+        if (!suppress_space) {
+            write("\n", .{});
+        }
     }
 
     pub fn seek(state: *State, iter: *Args) !void {
@@ -219,7 +275,7 @@ const Commands = struct {
     pub fn tell(state: *State, iter: *Args) !void {
         const where = try state.file.getPos();
         if (iter.next()) |value| {
-            try state.fields.put(try arena.allocator().dupe(u8, value), .{ .u64 = where });
+            try state.fields.put(try allo.dupe(u8, value), .{ .u64 = where });
         }
         write("current file position: {}\n", .{where});
     }
@@ -239,11 +295,13 @@ const Commands = struct {
             write("0x{X:0>8}:", .{where});
 
             for (line_buffer[0..actual]) |c, j| {
-                if (j == line_buffer.len / 2) write(" ", .{});
+                const col = j;
+                if (col % 4 == 0 and col > 0) write(" ", .{});
                 write(" {X:0>2}", .{c});
             }
             for (line_buffer[actual..]) |_, j| {
-                if ((actual + j) == line_buffer.len / 2) write(" ", .{});
+                const col = actual + j;
+                if (col % 4 == 0 and col > 0) write(" ", .{});
                 write(" __", .{});
             }
 
@@ -266,21 +324,39 @@ const Commands = struct {
         }
     }
 
+    pub fn diskdump(state: *State, iter: *Args) !void {
+        const len = try state.decodeInt(iter.next().?);
+        const filename = iter.next().?;
+
+        var out = std.fs.cwd().createFile(filename, .{}) catch @panic("i/o error");
+        defer out.close();
+
+        var i: u64 = 0;
+        while (i < len) {
+            var buffer: [8192]u8 = undefined;
+
+            const bytes = try state.file.read(&buffer);
+            if (bytes == 0) @panic("not enough data");
+
+            out.writer().writeAll(buffer[0..bytes]) catch @panic("i/o error");
+        }
+    }
+
     // pgm name
     pub fn pgm(state: *State, iter: *Args) !void {
         const name = iter.next().?;
 
-        const gop = try state.programs.getOrPut(try arena.allocator().dupe(u8, name));
+        const gop = try state.programs.getOrPut(try allo.dupe(u8, name));
         if (gop.found_existing)
             @panic("program already exists");
 
-        gop.value_ptr.* = std.ArrayList([]const u8).init(arena.allocator());
+        gop.value_ptr.* = std.ArrayList([]const u8).init(allo);
         state.current_pgm = gop.value_ptr;
     }
 
     // ! line
     pub fn @"!"(state: *State, iter: *Args) !void {
-        try state.current_pgm.?.append(try arena.allocator().dupe(u8, trim(iter.buffer[1..])));
+        try state.current_pgm.?.append(try allo.dupe(u8, trim(iter.buffer[1..])));
     }
 
     // replay name
@@ -289,7 +365,7 @@ const Commands = struct {
 
         var argc: usize = 0;
         while (iter.next()) |argv| : (argc += 1) {
-            const name = try std.fmt.allocPrint(arena.allocator(), "arg[{}]", .{argc});
+            const name = try std.fmt.allocPrint(allo, "arg[{}]", .{argc});
             try state.fields.put(name, try state.decode(argv));
         }
 
@@ -329,13 +405,248 @@ const Commands = struct {
         _ = iter;
         state.bitread = null;
     }
+
+    pub fn bitmap(state: *State, iter: *Args) !void {
+        const PixelFormat = enum {
+            rgb565,
+            rgb888,
+            bgr888,
+            rgbx8888,
+            rgba8888,
+            pub fn bpp(fmt: @This()) usize {
+                return switch (fmt) {
+                    .rgb565 => 2,
+                    .rgb888 => 3,
+                    .bgr888 => 3,
+                    .rgbx8888 => 4,
+                    .rgba8888 => 4,
+                };
+            }
+        };
+
+        const width = try state.decodeInt(iter.next().?);
+        const height = try state.decodeInt(iter.next().?);
+        const format = std.meta.stringToEnum(PixelFormat, iter.next().?) orelse @panic("invalid bitmap format");
+
+        const writeout = iter.next() orelse "";
+
+        const buffer_size = width * height * format.bpp();
+
+        if (writeout.len > 0) {
+            var out = std.fs.cwd().createFile(writeout, .{}) catch @panic("i/o error");
+            defer out.close();
+
+            out.writer().print("P6 {} {} 255\n", .{ width, height }) catch @panic("i/o error");
+
+            switch (format) {
+                .rgb565 => {
+                    var i: usize = 0;
+                    while (i < buffer_size) {
+                        var copy: [2]u8 = undefined;
+                        state.file.reader().readNoEof(&copy) catch @panic("i/o error");
+
+                        const Rgb = packed struct {
+                            r: u5,
+                            g: u6,
+                            b: u5,
+                        };
+
+                        const rgb = @bitCast(Rgb, copy);
+
+                        var vals = [3]u8{
+                            @as(u8, rgb.b) << 3 | @as(u8, rgb.b) >> 2,
+                            @as(u8, rgb.g) << 2 | @as(u8, rgb.g) >> 4,
+                            @as(u8, rgb.r) << 3 | @as(u8, rgb.r) >> 2,
+                        };
+
+                        out.writeAll(&vals) catch @panic("i/o error");
+
+                        i += copy.len;
+                    }
+                },
+                .rgb888 => {
+                    var i: usize = 0;
+                    while (i < buffer_size) {
+                        var copy: [8192]u8 = undefined;
+                        const maxlen = std.math.min(copy.len, buffer_size - i);
+
+                        const len = state.file.read(copy[0..maxlen]) catch @panic("i/o error");
+                        if (len == 0) @panic("unexpected eof in bitmap");
+
+                        out.writeAll(copy[0..len]) catch @panic("i/o error");
+
+                        i += copy.len;
+                    }
+                },
+                .bgr888 => {
+                    var i: usize = 0;
+                    while (i < buffer_size) {
+                        var copy: [3]u8 = undefined;
+                        state.file.reader().readNoEof(&copy) catch @panic("i/o error");
+
+                        std.mem.swap(u8, &copy[0], &copy[2]);
+
+                        out.writeAll(&copy) catch @panic("i/o error");
+
+                        i += copy.len;
+                    }
+                },
+                .rgbx8888 => @panic("rgbx8888 not supported for writeout yet."),
+                .rgba8888 => @panic("rgba8888 not supported for writeout yet."),
+            }
+        } else {
+            try state.file.seekBy(@intCast(i64, buffer_size));
+        }
+    }
+
+    pub fn lut(state: *State, iter: *Args) !void {
+        const value = try state.decodeInt(iter.next().?);
+
+        while (iter.next()) |key| {
+            const comp = try state.decodeInt(key);
+            const tag = iter.next().?;
+
+            if (value == comp) {
+                write("{} => {s}\n", .{ comp, tag });
+            }
+        }
+    }
+
+    pub fn divs(state: *State, iter: *Args) !void {
+        const value = try state.decodeInt(iter.next().?);
+
+        write("{} is divided by ", .{value});
+
+        var i: u64 = value;
+        var first = true;
+        while (i > 0) : (i -= 1) {
+            if ((value % i) == 0) {
+                if (!first) write(", ", .{});
+                write("{}", .{i});
+                first = false;
+            }
+        }
+        write("\n", .{});
+    }
+
+    pub fn findpattern(state: *State, iter: *Args) !void {
+        const MatchSet = std.bit_set.ArrayBitSet(usize, 256);
+
+        var list = std.ArrayList(MatchSet).init(allo);
+        defer list.deinit();
+
+        while (iter.next()) |item| {
+            if (std.mem.eql(u8, item, "*")) {
+                try list.append(MatchSet.initFull());
+            } else {
+                var set = MatchSet.initEmpty();
+                var opts = std.mem.tokenize(u8, item, "|");
+                while (opts.next()) |key| {
+                    const index = try std.fmt.parseInt(u8, key, 0);
+                    set.set(index);
+                }
+                try list.append(set);
+            }
+        }
+
+        var buffer = try allo.alloc(u8, list.items.len);
+        defer allo.free(buffer);
+
+        const H = struct {
+            fn isMatch(pattern: []const MatchSet, seq: []const u8) bool {
+                std.debug.assert(pattern.len == seq.len);
+                for (pattern) |mc, i| {
+                    if (!mc.isSet(seq[i]))
+                        return false;
+                }
+                return true;
+            }
+        };
+
+        try state.file.reader().readNoEof(buffer);
+
+        while (true) {
+            if (H.isMatch(list.items, buffer)) {
+                const offset = try state.file.getPos();
+                write("found match at {}: {any}\n", .{ offset - buffer.len, buffer });
+            }
+
+            std.mem.copy(u8, buffer[0..], buffer[1..]);
+            buffer[buffer.len - 1] = try state.file.reader().readByte();
+        }
+    }
+
+    // array <type> <len>? <pattern> <length>
+    pub fn array(state: *State, iter: *Args) !void {
+        const type_name = iter.next().?;
+        const val_type = std.meta.stringToEnum(Type, type_name) orelse std.debug.panic("unknown type: {s}", .{type_name});
+        const val_length = if (val_type.requiresLength())
+            try state.decodeInt(iter.next().?)
+        else
+            0;
+
+        const name_pattern = iter.next().?;
+        const name_pattern_split = std.mem.indexOfScalar(u8, name_pattern, '?') orelse @panic("name requires ? placeholder for index");
+
+        const length = try state.decodeInt(iter.next().?);
+
+        var i: usize = 0;
+        while (i < length) : (i += 1) {
+            var index_buf: [32]u8 = undefined;
+            const index = std.fmt.bufPrint(&index_buf, "{d}", .{i}) catch unreachable;
+
+            const value = try fetchType(state, val_type, val_length);
+
+            const name = try std.mem.join(allo, "", &.{
+                name_pattern[0..name_pattern_split],
+                index,
+                name_pattern[name_pattern_split + 1 ..],
+            });
+
+            write("{s: >20} = {}\n", .{ name, value });
+            try state.fields.put(name, value);
+        }
+    }
+
+    // template <variable> <pattern> <item> <item> <item>
+    pub fn select(state: *State, iter: *Args) !void {
+        const target_var = iter.next().?;
+        const pattern = iter.next().?;
+
+        var src_name = std.ArrayList(u8).init(allo);
+
+        var pos: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, pattern, pos, '?')) |item| {
+            defer pos = item + 1;
+
+            const slice = pattern[pos..item];
+            try src_name.appendSlice(slice);
+
+            const value = try state.decode(iter.next().?);
+
+            try src_name.writer().print("{}", .{value});
+        }
+
+        try src_name.appendSlice(pattern[pos..]);
+
+        const value = state.fields.get(src_name.items) orelse std.debug.panic("Variable {s} not found!", .{src_name.items});
+        try state.fields.put(try allo.dupe(u8, target_var), value);
+    }
 };
 
 const Program = std.ArrayList([]const u8);
 
+const Loop = struct {
+    start_offset: u64,
+    count: u64,
+    limit: u64,
+    loopvar: []const u8,
+};
+
 const State = struct {
     endianess: std.builtin.Endian = .Little,
     file: std.fs.File,
+    code: std.fs.File,
     fields: std.StringHashMap(Value),
     programs: std.StringHashMap(Program),
     condstack: std.ArrayList(bool),
@@ -343,10 +654,15 @@ const State = struct {
         le: std.io.BitReader(.Little, std.fs.File.Reader),
         be: std.io.BitReader(.Big, std.fs.File.Reader),
     },
+    repeatstack: std.ArrayList(Loop),
 
     current_pgm: ?*Program = null,
 
     fn enabled(state: State) bool {
+        for (state.repeatstack.items) |loop| {
+            if (loop.count >= loop.limit)
+                return false;
+        }
         return std.mem.allEqual(bool, state.condstack.items, true);
     }
 
@@ -364,7 +680,7 @@ const State = struct {
         return if (std.mem.startsWith(u8, str, "*"))
             state.fields.get(str[1..]) orelse std.debug.panic("var {s} not found", .{str[1..]})
         else if (std.mem.startsWith(u8, str, "\""))
-            Value{ .str = try arena.allocator().dupe(u8, str[1 .. str.len - 1]) }
+            Value{ .str = try allo.dupe(u8, str[1 .. str.len - 1]) }
         else if (std.fmt.parseInt(i64, str, 0)) |sval|
             Value{ .i64 = sval }
         else |_|
@@ -383,7 +699,7 @@ const State = struct {
     }
 };
 
-const Value = union(enum) {
+const Value = union(Type) {
     u8: u8,
     u16: u16,
     u32: u32,
@@ -450,10 +766,44 @@ const Value = union(enum) {
     }
 };
 
-const Type = std.meta.Tag(Value);
-
 fn readBits(br: anytype, out: []u1) !void {
     for (out) |*b| {
         b.* = try br.readBitsNoEof(u1, 1);
     }
 }
+
+const Type = enum {
+    u8,
+    u16,
+    u32,
+    u64,
+    i8,
+    i16,
+    i32,
+    i64,
+    f32,
+    f64,
+    str,
+    blob,
+    bitblob,
+    bits,
+
+    pub fn requiresLength(t: Type) bool {
+        return switch (t) {
+            .u8 => false,
+            .u16 => false,
+            .u32 => false,
+            .u64 => false,
+            .i8 => false,
+            .i16 => false,
+            .i32 => false,
+            .i64 => false,
+            .f32 => false,
+            .f64 => false,
+            .str => true,
+            .blob => true,
+            .bitblob => true,
+            .bits => true,
+        };
+    }
+};

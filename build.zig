@@ -1,4 +1,5 @@
 const std = @import("std");
+const zpm = @import("zpm.zig");
 
 pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
@@ -7,6 +8,7 @@ pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("livedecode", "src/main.zig");
     exe.setTarget(target);
     exe.setBuildMode(mode);
+    exe.addPackage(zpm.pkgs.@"parser-toolkit");
     exe.install();
 
     const run_cmd = exe.run();

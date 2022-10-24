@@ -35,27 +35,119 @@ If a line starts with a type, this type is decoded. If a name is given after the
 In a lot of places where not a name is expected, either immediate numbers can be written as decimal, hexadecimal (`0x1A`) or a
 variable reference can be used (`*variable`).
 
-Available commands are:
+## Commands, Macros and Variables
+
+### Commands
+
+`print …`
+
+prints all arguments. if an argument is a semicolon, no space is printed after the argument. If a semicolon is last, no line feed is printed.
+
+#### `seek <offset> …`
+
+sums up all offsets and moves the read cursor to the absolute position
+
+#### `move <offset> …`
+
+sums up all offsets and moves the read cursor relatively. Accepts negative numbers
+
+#### `tell`
+
+prints the file cursor
+
+#### `tell <variable`
+
+stores the file cursor in <variable>
+
+#### `dump <len>`
+
+dumps <len> bytes
+
+#### `pgm <name>`
+
+creates a new program called <name>
+
+#### `! …`
+
+appends everything past the ! to the last created program
+
+#### `replay <pgm> …`
+
+invokes a program named <pgm>. all arguments past that are passed as variables arg[0] to arg[n]
+
+#### `array <type> <pattern> <length>`
+
+Creates an array of <length> items called <pattern>. In <pattern>, the first occurance of `?` will be replaced with the array index. <type> determines the type of the array items.
+
+#### `array <type> <len> <pattern> <length>`
+
+Creates an array of <length> items called <pattern> where <type> is a sized type (str, blob, ...). In <pattern>, the first occurance of `?` will be replaced with the array index. <type> determines the type of the array items.
+
+#### `select <var> <pattern> <key> …`
+
+Builds a variable name from <pattern> and all provided <key>s. For each key, the next `?` in the <pattern> is replaced with the value of <key>.
+After all `?` are resolved, a global lookup is performed and the variable with the computed name is then copied into <var>.
+
+#### `endian le`
+
+changes integer endianess to little endian
+
+#### `endian little`
+
+changes integer endianess to little endian
+
+#### `endian be`
+
+changes integer endianess to big endian
+
+#### `endian big`
+
+changes integer endianess to big endian
+
+#### `bitread`
+
+switches to bit-reading mode
+
+#### `byteread`
+
+switches out of bit-reading mode, discarding any unread bits in the current byte
+
+#### `bitmap <width> <height> <format`
+
+consumes a bitmap of size <width>\*<height> and <format> rgb565, rgb888, bgr888, rgbx8888 or rgba8888
+
+#### `bitmap <width> <height> <format> <writeout`
+
+same as previous, but saves result to a PPM file called <writeout>
+
+#### `lut <index> <key> <tag> <key> <tag`
+
+Will perform a lookup on value <index>. If <index> matches <key>, the following <tag> is printed. Any number of <key> <tag> pairs can be passed.
+
+#### `divs <value`
+
+prints all possible integer divisors of <value>
+
+#### `diskdump <len> <filename`
+
+Reads <len> bytes and writes them into a file called <filename>. Useful to extract portions of a file.
+
+#### `findpattern …`
+
+All arguments together form a pattern. This pattern is then searched in the file from the cursor position on and each occurrence is printed with offset.
+
+Pattern components can either be a `*` for any kind of byte, or a list of `|`-separated integers that list the possibilities for this option.
+
+To make this more clear, let's consider this example:  
+We're searching for a list of u32 that can only consist of the integer values 1, 2 or 3, but there's a unknown length marker at the start that is a 16 bit value less than 256:
 
 ```rb
-print …         # prints all arguments
-seek <offset> … # sums up all offsets and moves the read cursor to the absolute position
-move <offset> … # sums up all offsets and moves the read cursor relatively. Accepts negative numbers
-tell            # prints the file cursor
-tell <variable> # stores the file cursor in <variable>
-dump <len>      # dumps <len> bytes
-pgm <name>      # creates a new program called <name>
-! …             # appends everything past the ! to the last created program
-replay <pgm> …  # invokes a program named <pgm>. all arguments past that are passed as variables arg[0] to arg[n]
-endian le       # changes integer endianess to little endian
-endian little   # changes integer endianess to little endian
-endian be       # changes integer endianess to big endian
-endian big      # changes integer endianess to big endian
-bitread         # switches to bit-reading mode
-byteread        # switches out of bit-reading mode, discarding any unread bits in the current byte
+# Search for at least 3 items:
+#           len  item 0       item 1       item 2
+findpattern * 0  1|2|3 0 0 0  1|2|3 0 0 0  1|2|3 0 0 0
 ```
 
-Available macros are:
+### Macros
 
 ```rb
 .if <value>          # the code following this will be executed if <value> is not 0
@@ -63,9 +155,12 @@ Available macros are:
 .else                # swaps the current execution condition
 .endif               # ends a if block
 .def <name> <value>  # creates a variable called <name> with the value <value>. Useful for constants or aliases
+.loop <count>        # Repeats the following code for <count> times.
+.loop <count> <var>  # Repeats the following code for <count> times. Writes the current index into <var>.
+.endloop             # Terminates the current loop
 ```
 
-Available types are:
+### Types
 
 ```rb
 u8            #  8 bit unsigned integer
@@ -82,6 +177,14 @@ str  <len>    # ascii string of <len> bytes, displayed as string+escapes
 blob <len>    # binary blob of <len> bytes, displayed as array
 bitblob <len> # binary blob of <len> bits, displayed as array of bits (only valid in bit-reading mode)
 bits <len>    # an unsigned integer of <len> bits up to 64 (only valid in bit-reading mode)
+```
+
+### Predefined variables
+
+```sh
+str <?> file.path # The full path of the current file
+str <?> file.name # The file name of the current file
+u64     file.size # Size of the current file in bytes
 ```
 
 ## Example
