@@ -39,9 +39,13 @@ variable reference can be used (`*variable`).
 
 ### Commands
 
-`print …`
+#### `print …`
 
 prints all arguments. if an argument is a semicolon, no space is printed after the argument. If a semicolon is last, no line feed is printed.
+
+#### `def <name> <value>`
+
+creates a variable called <name> with the value <value>. Useful for constants or aliases
 
 #### `seek <offset> …`
 
@@ -63,15 +67,9 @@ stores the file cursor in <variable>
 
 dumps <len> bytes
 
-#### `pgm <name>`
-
-creates a new program called <name>
-
-#### `! …`
-
 appends everything past the ! to the last created program
 
-#### `replay <pgm> …`
+#### `call <pgm> …`
 
 invokes a program named <pgm>. all arguments past that are passed as variables arg[0] to arg[n]
 
@@ -112,7 +110,7 @@ switches to bit-reading mode
 
 switches out of bit-reading mode, discarding any unread bits in the current byte
 
-#### `bitmap <width> <height> <format`
+#### `bitmap <width> <height> <format>`
 
 consumes a bitmap of size <width>\*<height> and <format> rgb565, rgb888, bgr888, rgbx8888 or rgba8888
 
@@ -120,7 +118,7 @@ consumes a bitmap of size <width>\*<height> and <format> rgb565, rgb888, bgr888,
 
 same as previous, but saves result to a PPM file called <writeout>
 
-#### `lut <index> <key> <tag> <key> <tag`
+#### `lut <index> ( <key> <tag> ) …`
 
 Will perform a lookup on value <index>. If <index> matches <key>, the following <tag> is printed. Any number of <key> <tag> pairs can be passed.
 
@@ -154,10 +152,11 @@ findpattern * 0  1|2|3 0 0 0  1|2|3 0 0 0  1|2|3 0 0 0
 .if <value> <equals> # the code following this will be executed if <value> is equals to <equals>
 .else                # swaps the current execution condition
 .endif               # ends a if block
-.def <name> <value>  # creates a variable called <name> with the value <value>. Useful for constants or aliases
 .loop <count>        # Repeats the following code for <count> times.
 .loop <count> <var>  # Repeats the following code for <count> times. Writes the current index into <var>.
 .endloop             # Terminates the current loop
+.pgm <name>          # creates a new program called <name>
+.endpgm              # ends the current program
 ```
 
 ### Types

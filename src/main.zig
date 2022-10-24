@@ -41,7 +41,7 @@ pub fn main() !void {
         .fields = std.StringHashMap(Value).init(allo),
         .programs = std.StringHashMap(std.ArrayList([]const u8)).init(allo),
         .condstack = std.ArrayList(bool).init(allo),
-        .repeatstack = std.ArrayList(Loop).init(allo),
+        .repeatstack = std.ArrayList(State.Loop).init(allo),
         .bitread = null,
     };
     try state.condstack.append(true);
@@ -187,16 +187,10 @@ const Macros = struct {
         _ = state.condstack.pop();
     }
 
-    pub fn @"def"(state: *State, iter: *Args) !void {
-        const name = try allo.dupe(u8, iter.next().?);
-        const value = try state.decode(iter.next().?);
-        try state.fields.put(name, value);
-    }
-
     // .loop <count>
     // .loop <count> <var>
     pub fn @"loop"(state: *State, iter: *Args) !void {
-        var lop = Loop{
+        var lop = State.Loop{
             .start_offset = try state.code.getPos(),
             .count = 0,
             .limit = try state.decodeInt(iter.next().?),
@@ -225,6 +219,12 @@ const Macros = struct {
 };
 
 const Commands = struct {
+    pub fn def(state: *State, iter: *Args) !void {
+        const name = try allo.dupe(u8, iter.next().?);
+        const value = try state.decode(iter.next().?);
+        try state.fields.put(name, value);
+    }
+
     pub fn print(state: *State, iter: *Args) !void {
         var suppress_space = false;
 
@@ -359,8 +359,8 @@ const Commands = struct {
         try state.current_pgm.?.append(try allo.dupe(u8, trim(iter.buffer[1..])));
     }
 
-    // replay name
-    pub fn replay(state: *State, iter: *Args) !void {
+    // program <name> <arg0> <arg1>
+    pub fn call(state: *State, iter: *Args) !void {
         const pgm_name = iter.next().?;
 
         var argc: usize = 0;
@@ -634,29 +634,17 @@ const Commands = struct {
     }
 };
 
-const Program = std.ArrayList([]const u8);
-
-const Loop = struct {
-    start_offset: u64,
-    count: u64,
-    limit: u64,
-    loopvar: []const u8,
-};
-
 const State = struct {
     endianess: std.builtin.Endian = .Little,
     file: std.fs.File,
     code: std.fs.File,
     fields: std.StringHashMap(Value),
-    programs: std.StringHashMap(Program),
     condstack: std.ArrayList(bool),
     bitread: ?union { // non-null while in bitread mode
         le: std.io.BitReader(.Little, std.fs.File.Reader),
         be: std.io.BitReader(.Big, std.fs.File.Reader),
     },
     repeatstack: std.ArrayList(Loop),
-
-    current_pgm: ?*Program = null,
 
     fn enabled(state: State) bool {
         for (state.repeatstack.items) |loop| {
@@ -697,6 +685,13 @@ const State = struct {
     fn reader(state: *State) std.io.Reader(*State, std.fs.File.Reader.Error, read) {
         return .{ .context = state };
     }
+
+    const Loop = struct {
+        start_offset: u64,
+        count: u64,
+        limit: u64,
+        loopvar: []const u8,
+    };
 };
 
 const Value = union(Type) {
@@ -807,3 +802,364 @@ const Type = enum {
         };
     }
 };
+
+const Ast = struct {
+    pub const Script = struct {
+        top_level: Sequence,
+        programs: []Program,
+    };
+
+    pub const Sequence = struct {
+        is_top_level: bool,
+        instructions: []Node,
+    };
+
+    pub const Node = union(enum) {
+        @"if": Conditional,
+        loop: Loop,
+        breakloop,
+        command: Command,
+        program: Program, // only legal on top-level sequence
+    };
+
+    pub const Program = struct {
+        name: []const u8,
+        code: Sequence,
+    };
+
+    pub const Conditional = struct {
+        value: ValueToken,
+        comparison: ?ValueToken,
+
+        true_body: Sequence,
+        false_body: ?Sequence,
+    };
+
+    pub const Loop = struct {
+        count: ValueToken,
+        variable: ?[]const u8,
+
+        body: Sequence,
+    };
+
+    pub const Command = struct {
+        name: []const u8,
+        arguments: []ValueToken,
+    };
+
+    pub const ValueToken = union(enum) {
+        variable_ref: []const u8, // *foo
+        string: []const u8, // "hello, world"-
+        tuple: []ValueToken, // ( <token> <token> <token> )
+        identifier: []const u8, // the rest: 10, hello, 24.5, foo_bar
+    };
+
+    const ptk = @import("parser-toolkit");
+
+    const TokenType = enum {
+        macro,
+        identifier,
+        @"(",
+        @")",
+        star_ref,
+        string,
+        line_feed,
+        whitespace,
+        comment,
+    };
+
+    const Pattern = ptk.Pattern(TokenType);
+    const Token = Tokenizer.Token;
+
+    const whitespace_chars = " \t";
+
+    const identifier_matcher = ptk.matchers.takeNoneOf(whitespace_chars ++ ")(\r\n");
+
+    const Tokenizer = ptk.Tokenizer(TokenType, &.{
+        Pattern.create(.line_feed, ptk.matchers.linefeed),
+        Pattern.create(.comment, ptk.matchers.sequenceOf(.{ ptk.matchers.literal("#"), ptk.matchers.takeNoneOf("\n") })),
+        Pattern.create(.@"(", ptk.matchers.literal("(")),
+        Pattern.create(.@")", ptk.matchers.literal(")")),
+        Pattern.create(.string, matchString),
+        Pattern.create(.macro, ptk.matchers.sequenceOf(.{ ptk.matchers.literal("."), identifier_matcher })),
+        Pattern.create(.star_ref, ptk.matchers.sequenceOf(.{ ptk.matchers.literal("*"), identifier_matcher })),
+        Pattern.create(.identifier, identifier_matcher),
+        Pattern.create(.whitespace, ptk.matchers.takeAnyOf(whitespace_chars)),
+    });
+
+    fn matchString(string: []const u8) ?usize {
+        if (string.len < 2) return null;
+        if (string[0] != '"') return null;
+
+        var i: usize = 1;
+        while (i < string.len) {
+            if (string[i] == '"') {
+                return i + 1;
+            }
+            if (string[i] == '\\') {
+                if (i + 1 == string.len) return null;
+                i += 1;
+            }
+            i += 1;
+        }
+
+        return null;
+    }
+
+    pub fn loadFile(file_name: []const u8) Script {
+        const source_code = std.fs.cwd().readFileAlloc(allo, 1 << 20) catch @panic("oom");
+
+        return load(source_code, file_name);
+    }
+
+    pub fn load(source_code: []const u8, file_name: ?[]const u8) Script {
+        var tokenizer = Tokenizer.init(source_code, file_name);
+
+        // Script
+
+        var script = Script{
+            .programs = allo.alloc(Program, 0) catch @panic("oom"),
+            .top_level = undefined,
+        };
+        script.top_level = parseSequence(&script, &tokenizer, null);
+        return script;
+    }
+
+    fn next(stream: *Tokenizer) ?Token {
+        while (true) {
+            var t = (stream.next() catch std.debug.panic("invalid token: '{}'", .{std.zig.fmtEscapes(stream.source[stream.offset..])})) orelse return null;
+
+            switch (t.type) {
+                .whitespace, .comment => {},
+                else => return t,
+            }
+        }
+    }
+
+    fn isStr(a: Token, b: []const u8) bool {
+        return std.mem.eql(u8, a.text, b);
+    }
+
+    fn fetchId(stream: *Tokenizer) []const u8 {
+        const id = next(stream) orelse @panic("identifier expected");
+        if (id.type != .identifier) @panic("identifier expected");
+        return id.text;
+    }
+
+    fn endOfLine(stream: *Tokenizer) void {
+        const id = next(stream) orelse return;
+        if (id.type != .line_feed)
+            @panic("Expected end of line!");
+    }
+
+    const Macro = enum {
+        @"if",
+        loop,
+        pgm,
+
+        endpgm,
+        endif,
+        elseif,
+        endloop,
+    };
+
+    fn parseSequence(script: *Script, stream: *Tokenizer, terminator: ?Macro) Sequence {
+        var list = std.ArrayList(Node).init(allo);
+        defer list.deinit();
+
+        while (true) {
+            const first_token: Token = next(stream) orelse if (terminator == null)
+                return Sequence{ .is_top_level = true, .instructions = list.toOwnedSlice() }
+            else
+                std.debug.panic("Expected {s}, not end of script.", .{@tagName(terminator.?)});
+
+            switch (first_token.type) {
+                .macro => {
+                    const mac = std.meta.stringToEnum(Macro, first_token.text[1..]) orelse std.debug.panic("Unknown macro {s}", .{first_token.text});
+
+                    if (terminator != null and mac == terminator.?) {
+                        return Sequence{
+                            .is_top_level = false,
+                            .instructions = list.toOwnedSlice(),
+                        };
+                    }
+
+                    switch (mac) {
+                        .@"if" => unreachable, // NOT DONE YET
+
+                        .loop => {
+                            const count = parseTokenValue(stream, next(stream) orelse @panic("expected loop counter!"));
+
+                            const var_or_term = next(stream) orelse Token{ .type = .line_feed, .text = "\n", .location = stream.current_location };
+                            const variable = switch (var_or_term.type) {
+                                .line_feed => null,
+                                .identifier => var_or_term.text,
+                                else => @panic("unexpected token"),
+                            };
+                            if (variable != null)
+                                endOfLine(stream);
+
+                            var seq = parseSequence(undefined, stream, .endloop);
+
+                            list.append(Node{
+                                .loop = Loop{
+                                    .count = count,
+                                    .variable = variable,
+                                    .body = seq,
+                                },
+                            }) catch @panic("oom");
+                        },
+
+                        .pgm => {
+                            if (terminator != null)
+                                @panic("Nested .pgm is not allowed");
+
+                            var pgm = Program{
+                                .name = fetchId(stream),
+                                .code = undefined,
+                            };
+                            endOfLine(stream);
+
+                            pgm.code = parseSequence(undefined, stream, .endpgm);
+
+                            const new = allo.realloc(script.programs, script.programs.len + 1) catch @panic("oom");
+                            new[new.len - 1] = pgm;
+                            script.programs = new;
+                        },
+
+                        .endloop, .endpgm, .endif, .elseif => std.debug.print("Unexpected token {s}", .{first_token.text}),
+                    }
+                },
+
+                // any command or type decoding
+                .identifier => {
+                    var cmd = Command{
+                        .name = first_token.text,
+                        .arguments = parseTokenList(stream, false),
+                    };
+                    list.append(Node{ .command = cmd }) catch @panic("oom");
+                },
+                .@"(", .@")", .star_ref, .string => std.debug.panic("illegal start of command: '{s}'", .{first_token.text}),
+                .line_feed => continue, // empty line
+                .whitespace, .comment => unreachable,
+            }
+        }
+    }
+
+    fn parseTokenValue(stream: *Tokenizer, item: Token) ValueToken {
+        return switch (item.type) {
+            .macro, .identifier => ValueToken{ .identifier = item.text },
+            .star_ref => ValueToken{ .variable_ref = item.text[1..] },
+            .string => ValueToken{ .string = unescapeString(item.text[1 .. item.text.len - 1]) },
+            .@"(" => ValueToken{ .tuple = parseTokenList(stream, true) },
+            .@")", .line_feed => std.debug.panic("Expected value, got {s}", .{@tagName(item.type)}),
+            .whitespace, .comment => unreachable,
+        };
+    }
+
+    fn parseTokenList(stream: *Tokenizer, is_tuple: bool) []ValueToken {
+        var items = std.ArrayList(ValueToken).init(allo);
+        defer items.deinit();
+
+        while (true) {
+            const item = next(stream) orelse if (is_tuple) @panic("tuple declaration is not closed") else return items.toOwnedSlice();
+
+            const val = switch (item.type) {
+                .@")" => if (is_tuple)
+                    return items.toOwnedSlice()
+                else
+                    @panic("no tuple declaration found"),
+                .line_feed => if (is_tuple)
+                    @panic("tuple declaration is not closed")
+                else
+                    return items.toOwnedSlice(),
+
+                else => parseTokenValue(stream, item),
+            };
+
+            items.append(val) catch @panic("oom");
+        }
+    }
+
+    fn unescapeString(str: []const u8) []const u8 {
+        // TODO: Implement this!
+        return str;
+    }
+
+    fn runTest(source: []const u8) Script {
+        arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        return load(source, null);
+    }
+
+    test "empty file" {
+        _ = runTest("");
+    }
+
+    test "only empty lines" {
+        _ = runTest("\n\n\n\r\n\r\n\r\n  \r\n     \r\n\t\t\r\n");
+    }
+
+    test "comments and empty lines" {
+        _ = runTest(
+            \\# hello
+            \\   # hello, this is nice
+            \\# unterminated!
+        );
+    }
+
+    test "commands" {
+        _ = runTest(
+            \\u32
+            \\u32 # with comment
+            \\u32 name
+            \\u16 name
+            \\str 16 name
+            \\type *name
+            \\type (tuple tuple)
+            \\type (tuple 1 2 3) (3 4 5)
+            \\type (*tfoo (1 2) (3 4))
+            \\type "hello, world"
+            \\type ("hello, string" "foo bar")
+            \\type "\"" "\'" "foo bar"
+            \\type .mac .foo .bar
+            \\
+        );
+    }
+
+    test "subprograms" {
+        const prog = runTest(
+            \\.pgm foobar
+            \\
+            \\.endpgm
+            \\
+        );
+        try std.testing.expectEqual(true, prog.top_level.is_top_level);
+        try std.testing.expectEqual(@as(usize, 0), prog.top_level.instructions.len);
+        try std.testing.expectEqual(@as(usize, 1), prog.programs.len);
+        try std.testing.expectEqualStrings("foobar", prog.programs[0].name);
+        try std.testing.expectEqual(false, prog.programs[0].code.is_top_level);
+        try std.testing.expectEqual(@as(usize, 0), prog.programs[0].code.instructions.len);
+    }
+
+    test "basic loop" {
+        const prog = runTest(
+            \\.loop 10
+            \\
+            \\.endloop
+        );
+        _ = prog;
+    }
+
+    test "variable loop" {
+        const prog = runTest(
+            \\.loop 10 index
+            \\
+            \\.endloop
+        );
+        _ = prog;
+    }
+};
+
+comptime {
+    _ = Ast;
+}
