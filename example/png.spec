@@ -26,7 +26,16 @@ call chunk "IEND"
 .pgm chunk
   print chunk *arg[0]
   u32 chunk_length
-  u32 type 
+  u32 type
+  lut *type \
+    (*tEXt      "text extension") \
+    (*IHDR      "image header") \
+    (*tIME      "creation time") \
+    (1732332865 gAMA) \
+    (1665684045 cHRM) \
+    (1649100612 bKGD) \
+    (1229209940 IDAT) \
+    (1229278788 "end of file")
   move -4
   str 4 type_str
   .if *type *tEXt

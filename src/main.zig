@@ -99,6 +99,7 @@ fn fetchType(state: *State, val_type: Type, length: usize) !Value {
                 @panic("attempt to read bits in byteread mode");
             }
         },
+        .tuple => unreachable,
     };
 
     return value;
@@ -152,6 +153,12 @@ const Args = struct {
             .str => |s| s,
             else => std.debug.panic("expected string value, got {s}", .{@tagName(val)}),
         };
+    }
+
+    pub fn getTuple(args: *Args) []const Value {
+        const tag = args.next() orelse @panic("not enough arguments, expected tuple.");
+        if (tag != .tuple) std.debug.panic("expected tuple, got {s}", .{@tagName(tag)});
+        return (args.state.decode(tag) catch unreachable).tuple;
     }
 };
 
@@ -492,12 +499,18 @@ const Commands = struct {
         const value = try state.decodeInt(iter.next().?);
 
         // TODO: Port to tuples
-        while (iter.next()) |key| {
-            const comp = try state.decodeInt(key);
-            const tag = iter.next().?;
+        while (iter.next()) |kv_src| {
+            if (kv_src != .tuple) @panic("lut expects a list of tuples!");
 
-            if (value == comp) {
-                write("{} => {s}\n", .{ comp, tag.identifier });
+            const kv = (state.decode(kv_src) catch unreachable).tuple;
+
+            if (kv.len != 2) @panic("lut expects 2-tuples.");
+
+            const key = kv[0].getInt();
+            const tag = kv[1].str;
+
+            if (value == key) {
+                write("{} => {s}\n", .{ key, tag });
             }
         }
     }
@@ -651,7 +664,6 @@ const State = struct {
         return switch (tag) {
             .variable_ref => |name| state.fields.get(name) orelse std.debug.panic("var {s} not found", .{name}),
             .string => |str| Value{ .str = str },
-            .tuple => @panic("tuples not supported yet"),
             .identifier => |id| Value{ .str = id },
             .number => |str| if (std.fmt.parseInt(i64, str, 0)) |sval|
                 Value{ .i64 = sval }
@@ -659,6 +671,13 @@ const State = struct {
                 Value{ .u64 = ival }
             else |_|
                 Value{ .f32 = try std.fmt.parseFloat(f32, str) },
+            .tuple => |src| blk: {
+                const tup = try allo.alloc(Value, src.len);
+                for (tup) |*dst, i| {
+                    dst.* = try state.decode(src[i]);
+                }
+                break :blk Value{ .tuple = tup };
+            },
         };
     }
 
@@ -756,6 +775,7 @@ const Value = union(Type) {
     f64: f64,
     str: []const u8,
     blob: []const u8,
+    tuple: []Value,
 
     // bitread cases
     bitblob: []const u1, // this is really inefficient but it's fine
@@ -777,6 +797,7 @@ const Value = union(Type) {
             .blob => @panic("blob is not an int"),
             .bitblob => @panic("bitblob is not an int"),
             .bits => |v| v,
+            .tuple => @panic("tuple is not convertible to int."),
         };
     }
 
@@ -796,6 +817,7 @@ const Value = union(Type) {
             .blob => @panic("blob is not an int"),
             .bitblob => @panic("bitblob is not an int"),
             .bits => |v| @intCast(i64, v), // TODO we might want to store the number of bits used so we can convert to signed
+            .tuple => @panic("tuple is not convertible to int."),
         };
     }
 
@@ -805,6 +827,15 @@ const Value = union(Type) {
         switch (val) {
             .str => |str| try writer.print("\"{}\"", .{std.zig.fmtEscapes(str)}),
             .blob => |str| try writer.print("{any}", .{str}),
+            .tuple => |tup| {
+                try writer.writeAll("(");
+                for (tup) |item, i| {
+                    if (i > 0)
+                        try writer.writeAll(" ");
+                    try writer.print("{}", .{item});
+                }
+                try writer.writeAll(")");
+            },
             inline else => |v| try writer.print("{d}", .{v}),
         }
     }
@@ -831,6 +862,7 @@ const Type = enum {
     blob,
     bitblob,
     bits,
+    tuple,
 
     pub fn requiresLength(t: Type) bool {
         return switch (t) {
@@ -848,6 +880,7 @@ const Type = enum {
             .blob => true,
             .bitblob => true,
             .bits => true,
+            .tuple => @panic("tuples cannot be read from the stream"),
         };
     }
 };

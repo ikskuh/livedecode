@@ -75,6 +75,8 @@ const whitespace_chars = " \t";
 const identifier_matcher = ptk.matchers.takeNoneOf(whitespace_chars ++ ")(\r\n");
 
 const Tokenizer = ptk.Tokenizer(TokenType, &.{
+    // allow escaping of a line feed to be considered whitespace => easy line continuation
+    Pattern.create(.whitespace, ptk.matchers.sequenceOf(.{ ptk.matchers.literal("\\"), ptk.matchers.linefeed })),
     Pattern.create(.line_feed, ptk.matchers.linefeed),
     Pattern.create(.comment, ptk.matchers.sequenceOf(.{ ptk.matchers.literal("#"), ptk.matchers.takeNoneOf("\n") })),
     Pattern.create(.@"(", ptk.matchers.literal("(")),
@@ -588,4 +590,20 @@ test "subprograms" {
     try std.testing.expectEqualStrings("foobar", prog.programs[0].name);
     try std.testing.expectEqual(false, prog.programs[0].code.is_top_level);
     try std.testing.expectEqual(@as(usize, 3), prog.programs[0].code.instructions.len);
+}
+
+test "line continuation" {
+    const prog = runTest(
+        \\lut *key \
+        \\  (key value) \
+        \\  (key value) \
+        \\  (key value) \
+        \\  (key value) \
+        \\  (key value)
+        \\magic
+    );
+    try std.testing.expectEqual(true, prog.top_level.is_top_level);
+    try std.testing.expectEqual(@as(usize, 2), prog.top_level.instructions.len);
+    try std.testing.expectEqualStrings("lut", prog.top_level.instructions[0].command.name);
+    try std.testing.expectEqualStrings("magic", prog.top_level.instructions[1].command.name);
 }

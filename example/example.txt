@@ -6,6 +6,7 @@
 chunk "IHDR" 
         chunk_length = 13
                 type = 1229472850
+1229472850 => image header
             type_str = "IHDR"
                width = 45
               height = 24
@@ -18,12 +19,14 @@ chunk "IHDR"
 chunk "gAMA" 
         chunk_length = 4
                 type = 1732332865
+1732332865 => gAMA
             type_str = "gAMA"
 0x00000029: 00 00 B1 8F  __ __ __ __  __ __ __ __  __ __ __ __ |....            |
                  crc = 201089285
 chunk "cHRM" 
         chunk_length = 32
                 type = 1665684045
+1665684045 => cHRM
             type_str = "cHRM"
 0x00000039: 00 00 7A 26  00 00 80 84  00 00 FA 00  00 00 80 E8 |..z&............|
 0x00000049: 00 00 75 30  00 00 EA 60  00 00 3A 98  00 00 17 70 |..u0...`..:....p|
@@ -31,12 +34,14 @@ chunk "cHRM"
 chunk "bKGD" 
         chunk_length = 6
                 type = 1649100612
+1649100612 => bKGD
             type_str = "bKGD"
 0x00000065: 00 FF 00 FF  00 FF __ __  __ __ __ __  __ __ __ __ |......          |
                  crc = 2696783763
 chunk "tIME" 
         chunk_length = 7
                 type = 1950960965
+1950960965 => creation time
             type_str = "tIME"
                 year = 2021
                month = 9
@@ -48,6 +53,7 @@ chunk "tIME"
 chunk "IDAT" 
         chunk_length = 399
                 type = 1229209940
+1229209940 => IDAT
             type_str = "IDAT"
 0x0000008A: 48 C7 ED 94  CD 8A 54 31  10 46 4F 25  55 91 E9 5E |H.....T1.FO%U..^|
 0x0000009A: 08 03 BE FF  13 3A 28 F4  BD AD 55 49  CA 45 FF 5E |.....:(...UI.E.^|
@@ -78,17 +84,20 @@ chunk "IDAT"
 chunk "tEXt" 
         chunk_length = 37
                 type = 1950701684
+1950701684 => text extension
             type_str = "tEXt"
                 text = "date:create\x002021-09-14T15:05:55+00:00"
                  crc = 3937509577
 chunk "tEXt" 
         chunk_length = 37
                 type = 1950701684
+1950701684 => text extension
             type_str = "tEXt"
                 text = "date:modify\x002021-09-14T15:05:55+00:00"
                  crc = 2615941237
 chunk "IEND" 
         chunk_length = 0
                 type = 1229278788
+1229278788 => end of file
             type_str = "IEND"
                  crc = 2923585666

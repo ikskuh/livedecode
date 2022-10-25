@@ -32,8 +32,20 @@ A line starting with `.` is a macro and is always executed. All other lines can 
 
 If a line starts with a type, this type is decoded. If a name is given after the type, a variable is created with that name.
 
-In a lot of places where not a name is expected, either immediate numbers can be written as decimal, hexadecimal (`0x1A`) or a
-variable reference can be used (`*variable`).
+In a lot of places where not a name is expected, either immediate numbers can be written as decimal, hexadecimal (`0x1A`) or a variable reference can be used (`*variable`).
+
+The parser can also accept tuple types, which are started by `(` and terminated by `)`. Tuples are inhomogenous arrays that are passed as a single argument. They are used for grouping arguments together.
+
+Lines can be continued with a `\`, so the following code is considered a single line by the parser:
+
+```
+lut *key \
+  (key value) \
+  (key value) \
+  (key value) \
+  (key value) \
+  (key value)
+```
 
 ## Commands, Macros and Variables
 
