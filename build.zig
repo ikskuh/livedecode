@@ -1,17 +1,22 @@
 const std = @import("std");
-const zpm = @import("zpm.zig");
 
 pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
-    const mode = b.standardReleaseOptions();
+    const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable("livedecode", "src/main.zig");
-    exe.setTarget(target);
-    exe.setBuildMode(mode);
-    exe.addPackage(zpm.pkgs.@"parser-toolkit");
-    exe.install();
+    const parser_toolkit = b.dependency("parser_toolkit", .{});
+    // const zig_args = b.dependency("args", .{});
 
-    const run_cmd = exe.run();
+    const exe = b.addExecutable(.{
+        .name = "livedecode",
+        .root_source_file = .{ .path = "src/main.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.addModule("parser-toolkit", parser_toolkit.module("parser-toolkit"));
+    b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_cmd.addArgs(args);
@@ -20,11 +25,13 @@ pub fn build(b: *std.build.Builder) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const exe_tests = b.addTest("src/main.zig");
-    exe_tests.setTarget(target);
-    exe_tests.setBuildMode(mode);
-    exe_tests.addPackage(zpm.pkgs.@"parser-toolkit");
+    const exe_tests = b.addTest(.{
+        .root_source_file = .{ .path = "src/main.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_tests.addModule("parser-toolkit", parser_toolkit.module("parser-toolkit"));
 
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&exe_tests.step);
+    test_step.dependOn(&b.addRunArtifact(exe_tests).step);
 }

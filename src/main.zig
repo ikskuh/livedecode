@@ -184,14 +184,14 @@ const Macros = struct {
         last.* = !last.*;
     }
 
-    pub fn @"endif"(state: *State, iter: *Args) !void {
+    pub fn endif(state: *State, iter: *Args) !void {
         _ = iter;
         _ = state.condstack.pop();
     }
 
     // .loop <count>
     // .loop <count> <var>
-    pub fn @"loop"(state: *State, iter: *Args) !void {
+    pub fn loop(state: *State, iter: *Args) !void {
         var lop = State.Loop{
             .start_offset = try state.code.getPos(),
             .count = 0,
@@ -204,7 +204,7 @@ const Macros = struct {
         }
     }
 
-    pub fn @"endloop"(state: *State, iter: *Args) !void {
+    pub fn endloop(state: *State, iter: *Args) !void {
         _ = iter;
         const lop = &state.repeatstack.items[state.repeatstack.items.len - 1];
 
@@ -302,12 +302,12 @@ const Commands = struct {
 
             write("0x{X:0>8}:", .{where});
 
-            for (line_buffer[0..actual]) |c, j| {
+            for (line_buffer[0..actual], 0..) |c, j| {
                 const col = j;
                 if (col % 4 == 0 and col > 0) write(" ", .{});
                 write(" {X:0>2}", .{c});
             }
-            for (line_buffer[actual..]) |_, j| {
+            for (line_buffer[actual..], 0..) |_, j| {
                 const col = actual + j;
                 if (col % 4 == 0 and col > 0) write(" ", .{});
                 write(" __", .{});
@@ -558,7 +558,7 @@ const Commands = struct {
         const H = struct {
             fn isMatch(pattern: []const MatchSet, seq: []const u8) bool {
                 std.debug.assert(pattern.len == seq.len);
-                for (pattern) |mc, i| {
+                for (pattern, 0..) |mc, i| {
                     if (!mc.isSet(seq[i]))
                         return false;
                 }
@@ -673,7 +673,7 @@ const State = struct {
                 Value{ .f32 = try std.fmt.parseFloat(f32, str) },
             .tuple => |src| blk: {
                 const tup = try allo.alloc(Value, src.len);
-                for (tup) |*dst, i| {
+                for (tup, 0..) |*dst, i| {
                     dst.* = try state.decode(src[i]);
                 }
                 break :blk Value{ .tuple = tup };
@@ -829,7 +829,7 @@ const Value = union(Type) {
             .blob => |str| try writer.print("{any}", .{str}),
             .tuple => |tup| {
                 try writer.writeAll("(");
-                for (tup) |item, i| {
+                for (tup, 0..) |item, i| {
                     if (i > 0)
                         try writer.writeAll(" ");
                     try writer.print("{}", .{item});

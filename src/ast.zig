@@ -133,6 +133,28 @@ pub fn load(source_code: []const u8, file_name: ?[]const u8) Script {
     return script;
 }
 
+// pub fn render(script: Script, stream: anytype) @TypeOf(stream).Error!void {
+//     for (script.programs) |prog| {
+//         try stream.print(".pgm {s}\n", .{prog.name});
+//         try renderSeq(1, prog.code, stream);
+//         try stream.writeAll(".endpgm\n\n");
+//     }
+
+//     try renderSeq(0, script.top_level, stream);
+// }
+
+// fn wrindent(indent: usize, stream: anytype) !void {
+//     try stream.writeByteNTimes(' ', indent);
+// }
+
+// fn renderSeq(indent: usize, seq: Sequence, stream: anytype) @TypeOf(stream).Error!void {
+//     for (seq.instructions) |instr| {
+//         switch (instr) {
+//             //
+//         }
+//     }
+// }
+
 fn next(stream: *Tokenizer) ?Token {
     while (true) {
         var t = (stream.next() catch std.debug.panic("invalid token: '{}'", .{std.zig.fmtEscapes(stream.source[stream.offset..])})) orelse return null;
@@ -224,7 +246,7 @@ fn parseConditionBlock(stream: *Tokenizer) Conditional {
         };
     }
 
-    if (if_terminator == .@"elseif") {
+    if (if_terminator == .elseif) {
         // transform .elseif into a
         //
         // .else
@@ -252,7 +274,7 @@ fn parseSequence(script: *Script, stream: *Tokenizer, terminator: ?*const fn (Ma
 
     while (true) {
         const first_token: Token = next(stream) orelse if (terminator == null)
-            return Sequence{ .is_top_level = true, .instructions = list.toOwnedSlice() }
+            return Sequence{ .is_top_level = true, .instructions = list.toOwnedSlice() catch @panic("out of memory") }
         else
             std.debug.panic("Did not expect end of script.", .{});
 
@@ -263,7 +285,7 @@ fn parseSequence(script: *Script, stream: *Tokenizer, terminator: ?*const fn (Ma
                 if (terminator != null and terminator.?(mac)) {
                     return Sequence{
                         .is_top_level = false,
-                        .instructions = list.toOwnedSlice(),
+                        .instructions = list.toOwnedSlice() catch @panic("oom"),
                     };
                 }
 
@@ -352,17 +374,17 @@ fn parseTokenList(stream: *Tokenizer, is_tuple: bool) []ValueToken {
     defer items.deinit();
 
     while (true) {
-        const item = next(stream) orelse if (is_tuple) @panic("tuple declaration is not closed") else return items.toOwnedSlice();
+        const item = next(stream) orelse if (is_tuple) @panic("tuple declaration is not closed") else return items.toOwnedSlice() catch @panic("oom");
 
         const val = switch (item.type) {
             .@")" => if (is_tuple)
-                return items.toOwnedSlice()
+                return items.toOwnedSlice() catch @panic("oom")
             else
                 @panic("no tuple declaration found"),
             .line_feed => if (is_tuple)
                 @panic("tuple declaration is not closed")
             else
-                return items.toOwnedSlice(),
+                return items.toOwnedSlice() catch @panic("oom"),
 
             else => parseTokenValue(stream, item),
         };
