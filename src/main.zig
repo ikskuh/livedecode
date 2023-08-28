@@ -64,8 +64,8 @@ fn fetchType(state: *State, val_type: Type, length: usize) !Value {
         .i16 => Value{ .i16 = try reader.readInt(i16, state.endianess) },
         .i32 => Value{ .i32 = try reader.readInt(i32, state.endianess) },
         .i64 => Value{ .i64 = try reader.readInt(i64, state.endianess) },
-        .f32 => Value{ .f32 = @bitCast(f32, try reader.readInt(u32, state.endianess)) },
-        .f64 => Value{ .f64 = @bitCast(f64, try reader.readInt(u64, state.endianess)) },
+        .f32 => Value{ .f32 = @bitCast(try reader.readInt(u32, state.endianess)) },
+        .f64 => Value{ .f64 = @bitCast(try reader.readInt(u64, state.endianess)) },
         .str => blk: {
             var mem = try allo.alloc(u8, length);
             try reader.readNoEof(mem);
@@ -447,7 +447,7 @@ const Commands = struct {
                             b: u5,
                         };
 
-                        const rgb = @bitCast(Rgb, copy);
+                        const rgb: Rgb = @bitCast(copy);
 
                         var vals = [3]u8{
                             @as(u8, rgb.b) << 3 | @as(u8, rgb.b) >> 2,
@@ -491,7 +491,7 @@ const Commands = struct {
                 .rgba8888 => @panic("rgba8888 not supported for writeout yet."),
             }
         } else {
-            try state.file.seekBy(@intCast(i64, buffer_size));
+            try state.file.seekBy(@intCast(buffer_size));
         }
     }
 
@@ -787,12 +787,12 @@ const Value = union(Type) {
             .u16 => |v| v,
             .u32 => |v| v,
             .u64 => |v| v,
-            .i8 => |v| @bitCast(u8, v),
-            .i16 => |v| @bitCast(u16, v),
-            .i32 => |v| @bitCast(u32, v),
-            .i64 => |v| @bitCast(u64, v),
-            .f32 => |v| @floatToInt(u64, v),
-            .f64 => |v| @floatToInt(u64, v),
+            .i8 => |v| @bitCast(v),
+            .i16 => |v| @bitCast(v),
+            .i32 => |v| @bitCast(v),
+            .i64 => |v| @bitCast(v),
+            .f32 => |v| @intFromFloat(v),
+            .f64 => |v| @intFromFloat(v),
             .str => |v| std.fmt.parseInt(u64, v, 0) catch unreachable,
             .blob => @panic("blob is not an int"),
             .bitblob => @panic("bitblob is not an int"),
@@ -803,20 +803,20 @@ const Value = union(Type) {
 
     pub fn getSignedInt(val: Value) i64 {
         return switch (val) {
-            .u8 => |v| @bitCast(i8, v),
-            .u16 => |v| @bitCast(i16, v),
-            .u32 => |v| @bitCast(i32, v),
-            .u64 => |v| @bitCast(i64, v),
+            .u8 => |v| @bitCast(v),
+            .u16 => |v| @bitCast(v),
+            .u32 => |v| @bitCast(v),
+            .u64 => |v| @bitCast(v),
             .i8 => |v| v,
             .i16 => |v| v,
             .i32 => |v| v,
             .i64 => |v| v,
-            .f32 => |v| @floatToInt(i64, v),
-            .f64 => |v| @floatToInt(i64, v),
+            .f32 => |v| @intFromFloat(v),
+            .f64 => |v| @intFromFloat(v),
             .str => |v| std.fmt.parseInt(i64, v, 0) catch unreachable,
             .blob => @panic("blob is not an int"),
             .bitblob => @panic("bitblob is not an int"),
-            .bits => |v| @intCast(i64, v), // TODO we might want to store the number of bits used so we can convert to signed
+            .bits => |v| @intCast(v), // TODO we might want to store the number of bits used so we can convert to signed
             .tuple => @panic("tuple is not convertible to int."),
         };
     }

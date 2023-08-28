@@ -1,15 +1,15 @@
 .{
-    .name = "ashet-pl",
+    .name = "livedecode",
     .version = "0.1.0",
 
     .dependencies = .{
         .parser_toolkit = .{
-            .url = "https://github.com/MasterQ32/parser-toolkit/archive/808d4360a96de73f51c54e81c6ecf252edf9a800.tar.gz",
-            .hash = "122035a324a6a46bc367ecd79dfb0bf666bda97cb64ab4f5d20e6d7e88972f608d84",
+            .url = "https://github.com/MasterQ32/parser-toolkit/archive/7e7188bfaa46d0ba36d1ef31c1f368d264aa6876.tar.gz",
+            .hash = "12202ae562efbd6a4f12f1b10c5237329d19d1be15eec7fa1b0b02f5658500bfcbfd",
         },
         .args = .{
-            .url = "https://github.com/MasterQ32/zig-args/archive/8dca20383cefe908121eec7311dc78f65f3a425e.tar.gz",
-            .hash = "1220888bb3e0830e3120f1a079c8aa7054de8dcf20f11b49fb8979414b5b9f701734",
+            .url = "https://github.com/MasterQ32/zig-args/archive/bb2eced8ddf28114b3a1ff761c2d80b90b1a61e2.tar.gz",
+            .hash = "12208556082c280af264ca2a174fd04fc7a35f865bfe59e2c61f4a977bf7a65063e4",
         },
     },
 }
